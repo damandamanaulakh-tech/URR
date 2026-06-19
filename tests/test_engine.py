@@ -79,6 +79,16 @@ def test_safety_allows_normal():
     assert not safety.check("help me think about my business idea").blocked
 
 
+def test_drift_guard_reanchors():
+    from sourceborn.drift_guard import reality_reanchor, TrajectoryTracker
+    on = reality_reanchor("scale my small business or do an MBA",
+                          "scale the small business; MBA adds little")
+    off = reality_reanchor("scale my small business or do an MBA",
+                           "the capital of France is Paris")
+    assert on.on_target and not off.on_target
+    assert TrajectoryTracker("a b c").drift_score("a b c") == 0.0
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

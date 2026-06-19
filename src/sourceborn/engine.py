@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import safety
+from .drift_guard import reality_reanchor
 from .enums import (
     Classification, EvidenceTag, ForceFitRisk, HaltType, LoopType, PenetrationScore,
 )
@@ -234,6 +235,12 @@ class SourcebornEngine:
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping
+
+        # 8b. REALITY RE-ANCHOR — anti-divert (SB-58): did we drift from Point Zero?
+        anchor = reality_reanchor(pz.literal_ask, draft)
+        lanes["reality_reanchor"] = anchor.note
+        self._t("SB-58", "reality_reanchor",
+                "passed" if anchor.on_target else "held", note=anchor.note)
 
         # 9. DELIVER -------------------------------------------------------
         out = Output(
