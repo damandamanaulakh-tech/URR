@@ -1,0 +1,267 @@
+"""SourcebornEngine — the control layer that binds the three memories.
+
+It runs the SOURCEBORN operating flow (PRINCIPLE §IV) over the SB+URR node map:
+
+    read & protect -> analyse true ask -> decompose -> bigger-picture triage
+    -> example & wisdom match -> live grounding -> URR verify -> place -> deliver
+
+The three memories it binds:
+  * reflex  = the user's fed corpus + example bank (``Persona`` + ``Memory``)
+  * instinct= the wisdom bank (``WisdomBank``)
+  * eyes    = live fact (``grounding`` hook; pluggable)
+
+Everything is written to the pyramid brains + Master Log, and every run teaches
+the clone one more example (it gets wiser with use).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from . import safety
+from .enums import (
+    Classification, EvidenceTag, ForceFitRisk, HaltType, LoopType, PenetrationScore,
+)
+from .halt_map import loop_for_halt
+from .llm import BaseModel, default_model
+from .memory import Memory
+from .models import (
+    GapItem, MemoryEntry, Output, PointZero, ProofItem, RawSource, TraceEntry, URRPacket,
+)
+from .nodes import SB_NODES, URR_NODES, sb_by_id
+from .parameters import COMPARISON_AXES, PARAMETER_BANK
+from .persona import Persona
+from .wisdom import WisdomBank
+
+
+@dataclass
+class RunResult:
+    output: Output
+    micro_questions: list[str]
+    matched_examples: list[str]
+    trace: list[TraceEntry]
+    gaps: list[GapItem]
+    proofs: list[ProofItem]
+    halts: list[str]
+
+
+class SourcebornEngine:
+    def __init__(
+        self,
+        root: str = ".sourceborn",
+        model: BaseModel | None = None,
+        grounding: Callable[[str], str] | None = None,
+    ) -> None:
+        self.memory = Memory(root)
+        self.persona = Persona(root)
+        self.wisdom = WisdomBank(root)
+        self.model = model or default_model()
+        # live-fact hook: supply your own (Tavily/web). Default = no live data.
+        self.grounding = grounding or (lambda q: "")
+        self.trace: list[TraceEntry] = []
+
+    # -- helpers -----------------------------------------------------------
+    def _t(self, node_id: str, action: str, status: str = "running",
+           halt: str | None = None, note: str = "") -> None:
+        self.trace.append(TraceEntry(node_id, action, status, halt, note))
+
+    @staticmethod
+    def _decompose(text: str) -> list[str]:
+        """Split a messy ask into micro-questions/claims (PRINCIPLE step 3)."""
+        import re
+        parts = re.split(r"(?<=[.?!;])\s+|\n+|\band\b|\bthen\b", text.strip())
+        return [p.strip(" -•\t") for p in parts if len(p.strip()) > 3] or [text.strip()]
+
+    @staticmethod
+    def _noise_strip(text: str) -> dict[str, list[str]]:
+        """SB-02: separate the raw ask into channels (kept, never discarded)."""
+        buckets: dict[str, list[str]] = {
+            "fact": [], "feeling": [], "assumption": [], "pressure": [],
+            "claim": [], "mystery": [], "invention_seed": [], "command": [],
+        }
+        for line in SourcebornEngine._decompose(text):
+            low = line.lower()
+            if any(w in low for w in ("i feel", "thrill", "fear", "ego", "pain", "love")):
+                buckets["feeling"].append(line)
+            elif any(w in low for w in ("must", "need", "want", "should", "have to")):
+                buckets["command"].append(line)
+            elif any(w in low for w in ("maybe", "what if", "could", "consider")):
+                buckets["assumption"].append(line)
+            elif any(w in low for w in ("invent", "new tool", "build", "create")):
+                buckets["invention_seed"].append(line)
+            elif any(w in low for w in ("why", "mystery", "unknown", "how come")):
+                buckets["mystery"].append(line)
+            else:
+                buckets["claim"].append(line)
+        return {k: v for k, v in buckets.items() if v}
+
+    # -- URR micro-pass ----------------------------------------------------
+    def urr_micropass(self, urr_id: str, sb_node_id: str, content: str,
+                      synthetic: bool = False) -> URRPacket:
+        """A verification gate: classify, score force-fit, detect halts.
+
+        This is the rule-based URR. A model-backed URR can subclass / replace it.
+        """
+        low = content.lower()
+        classification = Classification.CLAIM.value
+        evidence = EvidenceTag.REVIEW.value
+        force_fit = ForceFitRisk.LOW.value
+        halt: str | None = None
+
+        if synthetic:
+            classification = Classification.SPECULATION.value
+            evidence = EvidenceTag.SYNTHETIC.value
+        if any(w in low for w in ("always", "everyone", "never", "guaranteed", "obviously")):
+            force_fit = ForceFitRisk.HIGH.value
+            halt = HaltType.LOGIC.value
+        if any(w in low for w in ("proof", "evidence", "data", "fact", "current")):
+            if not self.grounding(content):
+                halt = HaltType.EVIDENCE.value
+        verdict = safety.check(content)
+        risk_flags: list[str] = []
+        if verdict.blocked:
+            halt = HaltType.SAFETY.value
+            risk_flags = verdict.reasons
+
+        return URRPacket(
+            urr_id=urr_id, sb_node_id=sb_node_id, classification=classification,
+            evidence_tag=evidence, force_fit_risk=force_fit,
+            halt_triggered=halt is not None, halt_type=halt, risk_flags=risk_flags,
+            recommended_action="open_loop" if halt else "proceed",
+            trace_note=f"URR {urr_id} on {sb_node_id}",
+        )
+
+    # -- the run -----------------------------------------------------------
+    def run(self, raw_text: str, origin: str = "chat", public_safe: bool = False,
+            learn: bool = True) -> RunResult:
+        self.trace = []
+        gaps: list[GapItem] = []
+        proofs: list[ProofItem] = []
+        halts: list[str] = []
+
+        # 0. SAFETY (hard boundary, mapped not executed) ------------------
+        verdict = safety.check(raw_text)
+        if verdict.blocked:
+            self._t("SB-53", "risk_gate", "held", HaltType.SAFETY.value,
+                    "; ".join(verdict.reasons))
+
+        # 1. READ & PROTECT — SB-01 Point Zero Lock, SB-04 preserve --------
+        raw = RawSource(text=raw_text, origin=origin).lock()
+        self.memory.write("SB-01", MemoryEntry(
+            node_id="SB-01", raw_source_id=raw.raw_source_id, content=raw_text,
+            classification=Classification.REVIEW_ONLY.value,
+            evidence_tag=EvidenceTag.OPEN.value, tags=["raw_source", "locked"],
+        ), name="Point Zero Lock")
+        pz = PointZero(raw_source_id=raw.raw_source_id, literal_ask=raw_text[:200])
+        pz.locked = True
+        self._t("SB-01", "point_zero_lock", "running", note="raw source locked")
+
+        # 2. NOISE STRIP — SB-02 ------------------------------------------
+        channels = self._noise_strip(raw_text)
+        self.memory.write("SB-02", MemoryEntry(
+            node_id="SB-02", raw_source_id=raw.raw_source_id,
+            content="noise-stripped channels", parameters={"channels": channels},
+            pyramid={"main": list(channels.keys()), "sub": [], "micro": []},
+        ), name="Noise & Static Stripper")
+        self._t("SB-02", "noise_strip", "running", note=",".join(channels))
+
+        # 3. DECOMPOSE into micro-questions -------------------------------
+        micro = self._decompose(raw_text)
+        self._t("SB-02", "decompose", "running", note=f"{len(micro)} micro-questions")
+
+        # 4. TRIAGE routine vs deep ---------------------------------------
+        deep = len(micro) > 1 or any(
+            w in raw_text.lower() for w in ("why", "prove", "mystery", "invent", "rh", "theory")
+        )
+        self._t("SB-03", "triage", "running", note="deep" if deep else "routine")
+
+        # 5. EXAMPLE & WISDOM MATCH (the heart) ---------------------------
+        matched: list[str] = []
+        seen: set[str] = set()
+        for mq in micro:
+            for ex in self.persona.recall(mq):            # reflex (your corpus)
+                item = f"corpus: {ex.question[:60]}"
+                if item not in seen:
+                    seen.add(item); matched.append(item)
+            for score, w, axes in self.wisdom.match(mq):  # instinct (wisdom)
+                item = f"{w.source}: {w.pattern[:70]} [axes: {', '.join(axes) or '—'}]"
+                if item not in seen:
+                    seen.add(item); matched.append(item)
+        self.memory.write("SB-32", MemoryEntry(
+            node_id="SB-32", raw_source_id=raw.raw_source_id,
+            content="example & wisdom match", parameters={"matched": matched},
+            tags=["example_match"],
+        ), name="Literature & Historical Pattern Hunter")
+        self._t("SB-32", "example_wisdom_match", "running", note=f"{len(matched)} matches")
+
+        # 6. LIVE GROUNDING — SB-33 (pluggable eyes) ----------------------
+        live = self.grounding(raw_text)
+        if not live and deep:
+            gaps.append(GapItem("No live fact source connected", "Evidence", "Medium",
+                                LoopType.EVIDENCE.value))
+        self._t("SB-33", "live_grounding", "running" if live else "gap_open",
+                note="live data" if live else "no live source")
+
+        # 7. URR VERIFY ----------------------------------------------------
+        packet = self.urr_micropass("URR-08", "SB-08", raw_text)
+        if packet.halt_triggered:
+            halts.append(packet.halt_type or "")
+            loop = loop_for_halt(HaltType(packet.halt_type))
+            self.memory.master_log({"event": "halt", "type": packet.halt_type,
+                                    "new_loop": loop.value})
+            self._t("URR-08", "verify", "held", packet.halt_type,
+                    f"opened {loop.value}")
+            if packet.halt_type == HaltType.EVIDENCE.value:
+                gaps.append(GapItem("Evidence halt at URR-08", "Evidence", "High",
+                                    loop.value))
+        else:
+            self._t("URR-08", "verify", "passed", note=packet.classification)
+
+        # 8. PLACE — build the lanes (URR-07 output lanes) ----------------
+        draft = self.model.complete(
+            system=self.persona.voice_guidance(),
+            prompt=f"Answer this using the matched examples and live fact.\n"
+                   f"ASK: {raw_text}\nMATCHED: {matched}\nLIVE: {live or 'none'}",
+        )
+        lanes = {
+            "reality_path": {"known": live or "needs live source",
+                             "what_would_prove_it": "connect Tavily/web grounding"},
+            "wild_path": {"preserved": channels.get("invention_seed", []) +
+                          channels.get("mystery", [])},
+            "classification": packet.classification,
+            "sequence_path": [n.sb_id for n in SB_NODES[:8]],
+        }
+        if verdict.blocked:
+            lanes["safety"] = verdict.safe_mapping
+
+        # 9. DELIVER -------------------------------------------------------
+        out = Output(
+            answer=draft,
+            lanes=lanes,
+            evidence_tag=packet.evidence_tag,
+            classification=packet.classification,
+            confidence="Low" if (gaps or halts) else "Medium",
+            falsifier="What live fact would disprove the matched example?",
+            penetration_score=(PenetrationScore.PENETRATED.value if deep
+                               else PenetrationScore.SHALLOW.value),
+            open_question=channels.get("mystery", [""])[0] if "mystery" in channels else "",
+            public_safe=public_safe,
+            matched_examples=matched,
+        )
+        self.memory.write("SB-64", MemoryEntry(
+            node_id="SB-64", raw_source_id=raw.raw_source_id, content=out.answer,
+            classification=out.classification, evidence_tag=out.evidence_tag,
+            parameters={"penetration": out.penetration_score, "confidence": out.confidence},
+            tags=["final_output"],
+        ), name="Final Output Generator")
+        self._t("SB-64", "deliver", "passed", note=out.evidence_tag)
+
+        # COMPOUND: the clone learns one more example (gets wiser with use) -
+        if learn:
+            self.persona.learn(raw_text, out.answer, note="auto-learned from run",
+                               classification=out.classification)
+            self._t("SB-69", "long_term_memory_lock", "passed",
+                    note="example bank +1")
+
+        return RunResult(out, micro, matched, list(self.trace), gaps, proofs, halts)
