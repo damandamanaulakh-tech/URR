@@ -20,6 +20,23 @@ PYTHONPATH=src python3 tests/test_engine.py   # 9 tests
 ```
 Set `ANTHROPIC_API_KEY` to swap the offline stub for real Claude reasoning.
 
+## Run it as a web service (dark chat UI)
+```bash
+python app.py                 # -> http://localhost:8000  (zero dependencies)
+```
+You get a dark chat page + a JSON API (`POST /ask`, `GET /health`) that shows the
+answer **and** the engine view: matched examples, output lanes, halts, re-anchor,
+and the SB/URR node trace.
+
+## Deploy to Render (one click)
+This repo ships a Render Blueprint (`render.yaml`). In Render: **New + → Blueprint
+→ pick this repo**. It runs `python app.py` and binds `$PORT` automatically — no
+build step (the engine is stdlib-only). Then in the Render dashboard add the env
+var `ANTHROPIC_API_KEY` to turn on real Claude reasoning. (Render's disk is
+ephemeral; to keep the brain's memory across deploys, enable the optional Render
+Disk in `render.yaml` or move memory to a DB — see `docs/RECOMMENDATION.md`.)
+
+
 ## Feed your brain (continuous learning)
 ```bash
 python tools/docx2txt.py yourfile.docx > yourfile.txt   # convert docs first
