@@ -135,7 +135,8 @@ class SourcebornEngine:
 
     # -- the run -----------------------------------------------------------
     def run(self, raw_text: str, origin: str = "chat", public_safe: bool = False,
-            learn: bool = True) -> RunResult:
+            learn: bool = True, model: BaseModel | None = None) -> RunResult:
+        active_model = model or self.model
         self.trace = []
         gaps: list[GapItem] = []
         proofs: list[ProofItem] = []
@@ -220,7 +221,7 @@ class SourcebornEngine:
             self._t("URR-08", "verify", "passed", note=packet.classification)
 
         # 8. PLACE — build the lanes (URR-07 output lanes) ----------------
-        draft = self.model.complete(
+        draft = active_model.complete(
             system=self.persona.voice_guidance(),
             prompt=f"Answer this using the matched examples and live fact.\n"
                    f"ASK: {raw_text}\nMATCHED: {matched}\nLIVE: {live or 'none'}",
