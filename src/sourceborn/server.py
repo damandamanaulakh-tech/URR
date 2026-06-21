@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -27,6 +28,27 @@ from .engine import SourcebornEngine
 from .llm import get_model, model_status
 
 ENGINE = SourcebornEngine(root=os.environ.get("SB_ROOT", ".sourceborn"))
+
+
+def _ingest_text(name: str, text: str) -> dict:
+    """Feed one note/file into the brain (memory + clone), and persist it to the
+    corpus folder on disk if SB_INGEST_CORPUS is set (e.g. a Render disk)."""
+    from .enums import Classification, EvidenceTag
+    from .models import MemoryEntry, RawSource
+    raw = RawSource(text=text, origin=f"upload:{name}").lock()
+    ENGINE.memory.write("SB-07", MemoryEntry(
+        node_id="SB-07", raw_source_id=raw.raw_source_id, content=text[:4000],
+        classification=Classification.REVIEW_ONLY.value,
+        evidence_tag=EvidenceTag.REVIEW.value, tags=["corpus", name],
+        parameters={"chars": len(text)}), name="First Memory Write")
+    ENGINE.persona.learn(question=name, answer=text[:1200], note="fed via app")
+    folder = os.environ.get("SB_INGEST_CORPUS")
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "note"
+        with open(os.path.join(folder, safe + ".txt"), "w", encoding="utf-8") as f:
+            f.write(text)
+    return {"memory": ENGINE.memory.stats(), "examples": len(ENGINE.persona.examples)}
 
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -76,6 +98,11 @@ border-radius:8px;padding:6px 10px;font-size:12px;background:var(--p2)}.stg.on{b
   </div>
   <div class=card><div class=k>Engine pyramid (stages fired)</div><div class=pyr id=pyr></div></div>
   <div class=card><div class=k>History</div><div class=hist id=hist><span class=muted>empty</span></div></div>
+  <div class=card><div class=k>Feed the brain</div>
+    <input id=fname placeholder="name (optional)" style="width:100%;background:var(--p2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px;margin-bottom:6px;font:inherit">
+    <textarea id=ftext placeholder="paste a note, thought, or core…" style="min-height:58px"></textarea>
+    <div class=row><button onclick=feed()>Add to memory</button><span class=muted id=fstat></span></div>
+  </div>
 </aside>
 
 <script>
@@ -141,6 +168,17 @@ function render(d){
       '<div class=card><div class=trace>'+tr+'</div><div class=muted style="margin-top:10px">memory: '+
       esc(JSON.stringify(d.memory))+' · clone learns 1 example each run</div></div></details>';
 }
+async function feed(){
+  const text=document.getElementById('ftext').value.trim(); if(!text)return;
+  const name=document.getElementById('fname').value.trim()||'note';
+  const fstat=document.getElementById('fstat'); fstat.textContent='adding…';
+  try{
+    const r=await fetch('/ingest',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,text})});
+    const d=await r.json();
+    fstat.textContent='memory: '+((d.memory&&d.memory.total_memory_entries)||0)+' · clone: '+(d.examples||0);
+    document.getElementById('ftext').value=''; document.getElementById('fname').value='';
+  }catch(e){fstat.textContent='error'}
+}
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))ask()});
 </script></div></body></html>"""
 
@@ -167,12 +205,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}', "application/json")
 
     def do_POST(self) -> None:
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            self._send(400, b'{"error":"bad json"}', "application/json")
+            return
+        if self.path == "/ingest":
+            text = (data.get("text") or "").strip()
+            if not text:
+                self._send(400, b'{"error":"empty text"}', "application/json")
+                return
+            stats = _ingest_text((data.get("name") or "note").strip(), text)
+            self._send(200, json.dumps({"ok": True, **stats}).encode(), "application/json")
+            return
         if self.path != "/ask":
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n) or b"{}")
             question = (data.get("question") or "").strip()
             if not question:
                 self._send(400, b'{"error":"empty question"}', "application/json")

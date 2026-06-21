@@ -11,14 +11,22 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # Offline by default (rule-based). Add your key in the Render dashboard to
-      # switch on real Claude reasoning — do NOT commit the key.
+      # Add these in the Render dashboard (sync:false = secret, never committed).
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
         sync: false
       - key: PYTHON_VERSION
         value: "3.12"
-    # Optional: persist the private brain across deploys (Render disks are paid).
-    # disk:
-    #   name: sourceborn-brain
-    #   mountPath: /opt/render/project/src/.sourceborn
-    #   sizeGB: 1
+      # Brain + corpus live on the persistent disk below, never in git.
+      - key: SB_ROOT
+        value: /var/sourceborn/brain
+      - key: SB_INGEST_CORPUS
+        value: /var/sourceborn/corpus
+    # Persistent disk: your private mind survives deploys and stays off GitHub.
+    disk:
+      name: sourceborn-brain
+      mountPath: /var/sourceborn
+      sizeGB: 1
