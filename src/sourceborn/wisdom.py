@@ -63,6 +63,24 @@ SEED_WISDOM: tuple[WisdomExample, ...] = (
         text="Recognise the Light within all; do not ask anyone's caste.",
         axes={"Motive/Shadow": "ego dissolves", "Moral/Sacred line": "equality"},
     ),
+    WisdomExample(
+        source="Tao Te Ching",
+        pattern="The hollow/empty is what makes a thing useful (hollow can beat weight)",
+        text="The usefulness of a cup is in its emptiness.",
+        axes={"Pattern": "emptiness as function", "Opposite/Inversion": "less is more"},
+    ),
+    WisdomExample(
+        source="Quran",
+        pattern="True nobility is inner righteousness (taqwa), not birth or wealth",
+        text="The most honoured of you is the most righteous, not the highest-born.",
+        axes={"Moral/Sacred line": "inner over outer", "Motive/Shadow": "status illusion"},
+    ),
+    WisdomExample(
+        source="Gospel",
+        pattern="The few who truly see vs the many who follow (visionary layer is small)",
+        text="The harvest is plentiful but the workers are few.",
+        axes={"Scale": "rare minds", "Pattern": "visionary/implementer/follower"},
+    ),
 )
 
 

@@ -89,6 +89,27 @@ def test_drift_guard_reanchors():
     assert TrajectoryTracker("a b c").drift_score("a b c") == 0.0
 
 
+def test_grounding_offline_is_empty():
+    # No TAVILY_API_KEY -> grounding is a safe no-op (engine opens an Evidence gap)
+    import os
+    from sourceborn.grounding import default_grounding
+    if not os.environ.get("TAVILY_API_KEY"):
+        assert default_grounding()("anything") == ""
+
+
+def test_output_has_citations_lanes():
+    eng = _engine()
+    res = eng.run("why does the small idea win?")
+    assert "corpus_citations" in res.output.lanes
+    assert "wisdom_citations" in res.output.lanes
+    assert res.output.lanes["wisdom_citations"]  # wisdom always matches something
+
+
+def test_wisdom_bank_expanded():
+    from sourceborn.wisdom import SEED_WISDOM
+    assert len(SEED_WISDOM) >= 8
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
