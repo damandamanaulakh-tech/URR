@@ -110,6 +110,35 @@ def test_wisdom_bank_expanded():
     assert len(SEED_WISDOM) >= 8
 
 
+def test_all_95_node_brains_configured():
+    from sourceborn.brains import build_default_configs
+    cfgs = build_default_configs()
+    assert len(cfgs) == 95                       # 70 SB + 25 URR
+    assert sum(1 for c in cfgs.values() if c.kind == "SB") == 70
+    assert sum(1 for c in cfgs.values() if c.kind == "URR") == 25
+    for c in cfgs.values():                       # every brain has full settings
+        assert c.pyramid and c.write_policy and c.risk_level and c.role
+
+
+def test_risk_nodes_force_human_review():
+    from sourceborn.brains import build_default_configs
+    cfgs = build_default_configs()
+    assert cfgs["SB-53"].human_review        # Risk & Command Gate
+    assert cfgs["URR-24"].human_review       # Human Final Gate
+    assert cfgs["SB-01"].immutable_source    # raw source never changes
+
+
+def test_brain_settings_roundtrip_and_weekly_update():
+    eng = _engine()
+    eng.brains.update("SB-10", risk_level="high", weekly_update=False)
+    assert eng.brains.get("SB-10").risk_level == "high"
+    # reload from disk -> persisted
+    from sourceborn.brains import BrainRegistry
+    assert BrainRegistry(eng.memory.root).get("SB-10").risk_level == "high"
+    res = eng.brains.weekly_update()
+    assert res["total"] == 95 and res["updated"] == 94   # SB-10 opted out
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

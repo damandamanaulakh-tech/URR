@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import safety
+from .brains import BrainRegistry
 from .drift_guard import reality_reanchor
 from .grounding import default_grounding
 from .enums import (
@@ -56,6 +57,7 @@ class SourcebornEngine:
         grounding: Callable[[str], str] | None = None,
     ) -> None:
         self.memory = Memory(root)
+        self.brains = BrainRegistry(root)   # settings of all 70 SB + 25 URR brains
         self.persona = Persona(root)
         self.wisdom = WisdomBank(root)
         self.model = model or default_model()

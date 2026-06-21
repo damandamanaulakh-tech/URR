@@ -23,6 +23,7 @@ import os
 import re
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 from .engine import SourcebornEngine
 from .llm import get_model, model_status
@@ -103,6 +104,10 @@ border-radius:8px;padding:6px 10px;font-size:12px;background:var(--p2)}.stg.on{b
     <textarea id=ftext placeholder="paste a note, thought, or core…" style="min-height:58px"></textarea>
     <div class=row><button onclick=feed()>Add to memory</button><span class=muted id=fstat></span></div>
   </div>
+  <div class=card><div class=k>Node brains (<span id=bcount>0</span>)</div>
+    <div class=row><button onclick=weeklyUpdate() style="padding:7px 12px">Weekly update</button><span class=muted id=bstat></span></div>
+    <div id=brains style="margin-top:8px"></div>
+  </div>
 </aside>
 
 <script>
@@ -179,6 +184,38 @@ async function feed(){
     document.getElementById('ftext').value=''; document.getElementById('fname').value='';
   }catch(e){fstat.textContent='error'}
 }
+async function loadBrains(){
+  try{
+    const d=await (await fetch('/brains')).json(); let total=0,html='';
+    for(const [g,list] of Object.entries(d)){
+      total+=list.length;
+      html+='<details><summary>'+esc(g)+' ('+list.length+')</summary>';
+      for(const c of list){
+        const flags=[c.human_review?'human-gate':'',c.urr_gate?'URR-gate':'',c.gen_params?'+params':'','risk:'+c.risk,c.write].filter(Boolean).join(' · ');
+        html+='<div class=lane style="cursor:pointer" onclick="brainDetail(\''+c.id+'\')"><b>'+esc(c.id)+'</b> '+esc(c.name)+'<br><span class=muted style=font-size:11px>'+esc(flags)+'</span></div>';
+      }
+      html+='</details>';
+    }
+    document.getElementById('brains').innerHTML=html; document.getElementById('bcount').textContent=total;
+  }catch(e){}
+}
+async function brainDetail(id){
+  const d=await (await fetch('/brain?id='+encodeURIComponent(id))).json(); const c=d.config; if(!c)return;
+  document.getElementById('out').innerHTML='<div class=card><div class=k>Brain '+esc(c.node_id)+' — '+esc(c.name)+'</div>'+
+    '<div class=lane>kind: '+esc(c.kind)+' · stage: '+c.stage+' · risk: '+esc(c.risk_level)+' · status: '+esc(c.status)+'</div>'+
+    '<div class=lane>pyramid (Node→Main→Sub→Micro): '+esc(JSON.stringify(c.pyramid))+'</div>'+
+    '<div class=lane>write policy: '+esc(c.write_policy)+' · URR gate: '+c.urr_gate+' · human review: '+c.human_review+'</div>'+
+    '<div class=lane>weekly update: '+c.weekly_update+' · generates params: '+c.can_generate_parameters+' · immutable source: '+c.immutable_source+'</div>'+
+    '<div class=lane>tracks parameter groups: '+esc((c.tracked_groups||[]).join(', '))+'</div>'+
+    '<div class=lane>role: '+esc(c.role)+'</div>'+
+    '<div class=lane class=muted>memory entries: '+((d.memory&&d.memory.entry_count)||0)+'</div></div>';
+}
+async function weeklyUpdate(){
+  const b=document.getElementById('bstat'); b.textContent='updating…';
+  try{const d=await (await fetch('/brains/update',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
+    b.textContent='updated '+d.updated+'/'+d.total;}catch(e){b.textContent='error'}
+}
+loadBrains();
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))ask()});
 </script></div></body></html>"""
 
@@ -195,11 +232,33 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        if self.path in ("/", "/index.html"):
+        route = urlparse(self.path)
+        path, qs = route.path, parse_qs(route.query)
+        if path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
-        elif self.path == "/health":
+        elif path == "/health":
             body = json.dumps({"ok": True, "model": ENGINE.model.name,
-                               "models": model_status()})
+                               "models": model_status(),
+                               "brains": len(ENGINE.brains.all())})
+            self._send(200, body.encode(), "application/json")
+        elif path == "/brains":
+            # settings of every node brain, grouped by stage
+            payload = {g: [{
+                "id": c.node_id, "name": c.name, "kind": c.kind, "stage": c.stage,
+                "human_review": c.human_review, "urr_gate": c.urr_gate,
+                "risk": c.risk_level, "write": c.write_policy,
+                "weekly": c.weekly_update, "gen_params": c.can_generate_parameters,
+                "groups": c.tracked_groups,
+            } for c in cs] for g, cs in ENGINE.brains.by_stage().items()}
+            self._send(200, json.dumps(payload).encode(), "application/json")
+        elif path == "/brain":
+            node_id = (qs.get("id") or [""])[0]
+            cfg = ENGINE.brains.get(node_id)
+            if not cfg:
+                self._send(404, b'{"error":"no such node"}', "application/json")
+                return
+            body = json.dumps({"config": asdict(cfg),
+                               "memory": ENGINE.memory.brain(node_id).meta})
             self._send(200, body.encode(), "application/json")
         else:
             self._send(404, b'{"error":"not found"}', "application/json")
@@ -218,6 +277,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             stats = _ingest_text((data.get("name") or "note").strip(), text)
             self._send(200, json.dumps({"ok": True, **stats}).encode(), "application/json")
+            return
+        if self.path == "/brains/update":   # weekly brain update (Principle 12)
+            self._send(200, json.dumps(ENGINE.brains.weekly_update()).encode(),
+                       "application/json")
+            return
+        if self.path == "/brain/settings":  # edit one node brain's settings
+            node_id = (data.get("id") or "").strip()
+            try:
+                cfg = ENGINE.brains.update(
+                    node_id, **{k: v for k, v in data.items() if k != "id"})
+            except KeyError:
+                self._send(404, b'{"error":"no such node"}', "application/json")
+                return
+            self._send(200, json.dumps({"ok": True, "config": asdict(cfg)}).encode(),
+                       "application/json")
             return
         if self.path != "/ask":
             self._send(404, b'{"error":"not found"}', "application/json")
