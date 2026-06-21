@@ -14,6 +14,7 @@ Quick start::
 
 from .engine import SourcebornEngine, RunResult
 from .memory import Memory, NodeBrain
+from .brains import BrainRegistry, NodeConfig, build_default_configs
 from .persona import Persona
 from .wisdom import WisdomBank
 from .models import RawSource, PointZero, MemoryEntry, Output
@@ -26,6 +27,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "SourcebornEngine", "RunResult", "Memory", "NodeBrain", "Persona",
+    "BrainRegistry", "NodeConfig", "build_default_configs",
     "WisdomBank", "RawSource", "PointZero", "MemoryEntry", "Output",
     "HaltType", "LoopType", "LoopStatus", "Classification", "EvidenceTag",
     "ForceFitRisk", "ConstructionMode", "PenetrationScore", "Lane",
