@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from . import safety
 from .brains import BrainRegistry
+from .core_gate import six_lenses
 from .drift_guard import reality_reanchor
 from .grounding import default_grounding
 from .enums import (
@@ -181,6 +182,19 @@ class SourcebornEngine:
         )
         self._t("SB-03", "triage", "running", note="deep" if deep else "routine")
 
+        # 4b. CORE GATE — six lenses (SB-10): read the human under the words
+        core = six_lenses(raw_text)
+        self.memory.write("SB-10", MemoryEntry(
+            node_id="SB-10", raw_source_id=raw.raw_source_id,
+            content=f"core gate dominant lens: {core['dominant_lens']}",
+            parameters={"lenses": core["lenses"]},
+            pyramid={"main": [k for k, v in core["lenses"].items() if v["active"]],
+                     "sub": [], "micro": []},
+            tags=["core_gate", "human_layer"],
+        ), name="Core Gate — Six Lenses")
+        self._t("SB-10", "core_gate", "running",
+                note=f"dominant: {core['dominant_lens']} ({core['active_count']}/6 lenses)")
+
         # 5. EXAMPLE & WISDOM MATCH (the heart) ---------------------------
         matched: list[str] = []
         seen: set[str] = set()
@@ -239,6 +253,10 @@ class SourcebornEngine:
             # citations — every claim is backed below it (the grounding pyramid)
             "corpus_citations": [m[8:] for m in matched if m.startswith("corpus:")][:5],
             "wisdom_citations": [m for m in matched if not m.startswith("corpus:")][:5],
+            # Core Gate reading (the human under the words)
+            "human_layer": {"dominant_lens": core["dominant_lens"],
+                            "active": {k: v["reading"] for k, v in
+                                       core["lenses"].items() if v["active"]}},
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping

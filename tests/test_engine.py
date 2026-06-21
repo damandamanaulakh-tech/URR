@@ -139,6 +139,34 @@ def test_brain_settings_roundtrip_and_weekly_update():
     assert res["total"] == 95 and res["updated"] == 94   # SB-10 opted out
 
 
+def test_core_gate_six_lenses():
+    from sourceborn.core_gate import six_lenses
+    r = six_lenses("I need to prove my image and status, but I'm afraid I'll fail")
+    assert len(r["lenses"]) == 6
+    assert r["dominant_lens"] in ("Mask & Payoff", "Wound & Threat")
+    assert r["active_count"] >= 2
+
+
+def test_run_includes_human_layer():
+    eng = _engine()
+    res = eng.run("I want to prove myself and I fear failing")
+    hl = res.output.lanes.get("human_layer")
+    assert hl and hl["dominant_lens"]
+    assert any(t.node_id == "SB-10" for t in res.trace)   # Core Gate fired
+
+
+def test_weekly_scheduler_due_then_not():
+    import tempfile
+    from sourceborn import scheduler
+    eng = _engine()
+    root = eng.memory.root
+    assert scheduler.due(root) is True                 # never run -> due
+    res = scheduler.run_if_due(eng, root)
+    assert res and res["total"] == 95
+    assert scheduler.due(root) is False                # just ran -> not due
+    assert scheduler.status(root)["last_weekly_update"]
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
