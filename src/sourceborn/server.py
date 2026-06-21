@@ -25,10 +25,12 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from . import scheduler
 from .engine import SourcebornEngine
 from .llm import get_model, model_status
 
-ENGINE = SourcebornEngine(root=os.environ.get("SB_ROOT", ".sourceborn"))
+SB_ROOT = os.environ.get("SB_ROOT", ".sourceborn")
+ENGINE = SourcebornEngine(root=SB_ROOT)
 
 
 def _ingest_text(name: str, text: str) -> dict:
@@ -74,6 +76,10 @@ label input{accent-color:var(--acc)}.muted{color:var(--mut)}.k{color:var(--mut);
 .pyr{display:flex;flex-direction:column;gap:5px}.stg{display:flex;justify-content:space-between;border:1px solid var(--line);
 border-radius:8px;padding:6px 10px;font-size:12px;background:var(--p2)}.stg.on{border-color:var(--acc);color:var(--ink)}
 .stg b{color:var(--mut);font-weight:600}.stg.on b{color:var(--acc)}
+.plvl{margin:3px auto;border:1px solid var(--line);background:var(--p2);border-radius:8px;padding:5px 8px;text-align:center;font-size:11px;color:var(--mut);transition:.2s}
+.plvl.on{border-color:var(--acc);background:#16203a;color:var(--ink)}
+.bset{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.bset select{padding:5px 7px}
 .mem{display:flex;gap:6px;flex-wrap:wrap}.dot{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--mut)}
 .hist a{display:block;color:var(--mut);font-size:13px;padding:5px 0;border-bottom:1px solid var(--line);cursor:pointer;text-decoration:none}
 .hist a:hover{color:var(--ink)}details summary{cursor:pointer;color:var(--mut)}
@@ -126,12 +132,18 @@ fetch('/health').then(r=>r.json()).then(d=>{
     o.textContent=labels[k]+(ok?'':' — add key');if(!ok&&k!=='offline')o.disabled=true;
     if(k===d.model)o.selected=true;sel.appendChild(o);
   }
-}); drawPyr([]); drawHist();
+}); drawPyr(new Set(),{}); drawHist();
 
-function drawPyr(fired){
-  const set=new Set(fired.map(stageOf));
-  document.getElementById('pyr').innerHTML=STAGES.map(s=>
-    `<div class="stg ${set.has(+s[0])?'on':''}"><span><b>SB stage ${s[0]}</b> ${s[1]}</span><span>${set.has(+s[0])?'●':'·'}</span></div>`).join('');
+function drawPyr(firedStages,counts){
+  firedStages=firedStages||new Set(); counts=counts||{};
+  let html='';
+  for(let i=STAGES.length-1;i>=0;i--){            // apex (stage 8) on top -> base
+    const s=STAGES[i], n=+s[0], on=firedStages.has(n), w=44+(8-n)*7;
+    const c=counts[n]?(' · '+counts[n]+' fired'):'';
+    html+='<div class="plvl'+(on?' on':'')+'" style="width:'+w+'%">SB'+n+' '+esc(s[1])+c+'</div>';
+  }
+  html+='<div class=plvl style="width:100%;opacity:.65">URR · 25 verification gates</div>';
+  document.getElementById('pyr').innerHTML=html;
 }
 function drawHist(){
   const h=document.getElementById('hist');
@@ -151,8 +163,9 @@ async function ask(){
 }
 function render(d){
   const o=d.output||{},lanes=o.lanes||{};
-  const fired=(d.trace||[]).map(t=>t.node_id).filter(x=>(x||'').startsWith('SB-'));
-  drawPyr(fired);
+  const firedStages=new Set(),counts={};
+  (d.trace||[]).forEach(t=>{const s=stageOf(t.node_id); if(s){firedStages.add(s); counts[s]=(counts[s]||0)+1;}});
+  drawPyr(firedStages,counts);
   const m=(d.matched_examples||[]).map(x=>'<div class=lane>'+esc(x)+'</div>').join('')||'<span class=muted>none yet — feed your corpus</span>';
   const tr=(d.trace||[]).map(t=>{const h=t.halt?(' <span class=hl>[HALT:'+esc(t.halt)+']</span>'):'';
     return esc((t.node_id||'').padEnd(7))+' '+esc((t.action||'').padEnd(20))+' '+esc(t.status)+h+'  '+esc(t.note||'')}).join('<br>');
@@ -163,6 +176,9 @@ function render(d){
       '</span>'+(o.public_safe?'<span class=tag>public-safe</span>':'')+'</div>'+
       '<div class=muted style="margin-top:8px">falsifier: '+esc(o.falsifier)+'</div></div>'+
     '<div class=card><div class=k>Eternal example & wisdom match</div>'+m+'</div>'+
+    '<div class=card><div class=k>Core Gate · human layer (SB-10)</div>'+
+      '<div class=lane>dominant lens: <b>'+esc((lanes.human_layer||{}).dominant_lens||'—')+'</b></div>'+
+      Object.entries((lanes.human_layer||{}).active||{}).map(([k,v])=>'<div class=lane><b>'+esc(k)+'</b> '+esc(v)+'</div>').join('')+'</div>'+
     '<div class=card><div class=k>Output lanes (URR-07)</div>'+
       '<div class=lane><b>Reality</b> '+esc(JSON.stringify(lanes.reality_path||{}))+'</div>'+
       '<div class=lane><b>Wild path (preserved)</b> '+esc(JSON.stringify((lanes.wild_path||{}).preserved||[]))+'</div>'+
@@ -199,16 +215,27 @@ async function loadBrains(){
     document.getElementById('brains').innerHTML=html; document.getElementById('bcount').textContent=total;
   }catch(e){}
 }
+function _sel(name,opts,val){return '<select id=bs_'+name+'>'+opts.map(o=>'<option'+(o===val?' selected':'')+'>'+o+'</option>').join('')+'</select>'}
+function _chk(name,val){return '<label><input type=checkbox id=bs_'+name+(val?' checked':'')+'> '+name.replace(/_/g,' ')+'</label>'}
 async function brainDetail(id){
   const d=await (await fetch('/brain?id='+encodeURIComponent(id))).json(); const c=d.config; if(!c)return;
   document.getElementById('out').innerHTML='<div class=card><div class=k>Brain '+esc(c.node_id)+' — '+esc(c.name)+'</div>'+
-    '<div class=lane>kind: '+esc(c.kind)+' · stage: '+c.stage+' · risk: '+esc(c.risk_level)+' · status: '+esc(c.status)+'</div>'+
-    '<div class=lane>pyramid (Node→Main→Sub→Micro): '+esc(JSON.stringify(c.pyramid))+'</div>'+
-    '<div class=lane>write policy: '+esc(c.write_policy)+' · URR gate: '+c.urr_gate+' · human review: '+c.human_review+'</div>'+
-    '<div class=lane>weekly update: '+c.weekly_update+' · generates params: '+c.can_generate_parameters+' · immutable source: '+c.immutable_source+'</div>'+
-    '<div class=lane>tracks parameter groups: '+esc((c.tracked_groups||[]).join(', '))+'</div>'+
+    '<div class=lane>kind: '+esc(c.kind)+' · stage: '+c.stage+' · pyramid (Node→Main→Sub→Micro): '+esc(JSON.stringify(c.pyramid))+'</div>'+
     '<div class=lane>role: '+esc(c.role)+'</div>'+
-    '<div class=lane class=muted>memory entries: '+((d.memory&&d.memory.entry_count)||0)+'</div></div>';
+    '<div class=bset>risk '+_sel('risk_level',['low','medium','high'],c.risk_level)+
+      ' &nbsp; write '+_sel('write_policy',['every_visit','on_finding','checkpoint'],c.write_policy)+'</div>'+
+    '<div class=bset>'+_chk('urr_gate',c.urr_gate)+_chk('human_review',c.human_review)+_chk('weekly_update',c.weekly_update)+_chk('can_generate_parameters',c.can_generate_parameters)+'</div>'+
+    '<div class=row><button onclick="saveBrain(\''+c.node_id+'\')">Save settings</button><span class=muted id=savestat></span>'+
+      (c.immutable_source?'<span class=tag>immutable source</span>':'')+'</div>'+
+    '<div class=lane class=muted>tracks: '+esc((c.tracked_groups||[]).join(', '))+' · memory entries: '+((d.memory&&d.memory.entry_count)||0)+'</div></div>';
+}
+async function saveBrain(id){
+  const g=n=>document.getElementById('bs_'+n), st=document.getElementById('savestat'); st.textContent='saving…';
+  const body={id,risk_level:g('risk_level').value,write_policy:g('write_policy').value,
+    urr_gate:g('urr_gate').checked,human_review:g('human_review').checked,
+    weekly_update:g('weekly_update').checked,can_generate_parameters:g('can_generate_parameters').checked};
+  try{const d=await (await fetch('/brain/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+    st.textContent=d.ok?'saved ✓':'error'; loadBrains();}catch(e){st.textContent='error'}
 }
 async function weeklyUpdate(){
   const b=document.getElementById('bstat'); b.textContent='updating…';
@@ -239,7 +266,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/health":
             body = json.dumps({"ok": True, "model": ENGINE.model.name,
                                "models": model_status(),
-                               "brains": len(ENGINE.brains.all())})
+                               "brains": len(ENGINE.brains.all()),
+                               "weekly": scheduler.status(SB_ROOT)})
             self._send(200, body.encode(), "application/json")
         elif path == "/brains":
             # settings of every node brain, grouped by stage
@@ -330,6 +358,7 @@ def _maybe_ingest_on_boot() -> None:
 
 def main() -> None:
     _maybe_ingest_on_boot()
+    scheduler.start_weekly_scheduler(ENGINE, SB_ROOT)  # auto Monday brain update
     port = int(os.environ.get("PORT", "8000"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Sourceborn web service on http://0.0.0.0:{port}  (model: {ENGINE.model.name})")
