@@ -1,0 +1,24 @@
+# Sourceborn local brain (private memory — never commit your private mind)
+.sourceborn/
+*.sourceborn/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+desktop.ini
+.idea/
+.vscode/
+
+# Scratch
+/tmp_extract/
+*.log
