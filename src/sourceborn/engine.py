@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from . import safety
 from .drift_guard import reality_reanchor
+from .grounding import default_grounding
 from .enums import (
     Classification, EvidenceTag, ForceFitRisk, HaltType, LoopType, PenetrationScore,
 )
@@ -58,8 +59,8 @@ class SourcebornEngine:
         self.persona = Persona(root)
         self.wisdom = WisdomBank(root)
         self.model = model or default_model()
-        # live-fact hook: supply your own (Tavily/web). Default = no live data.
-        self.grounding = grounding or (lambda q: "")
+        # live-fact hook (the "eyes"): Tavily if TAVILY_API_KEY set, else no-op.
+        self.grounding = grounding or default_grounding()
         self.trace: list[TraceEntry] = []
 
     # -- helpers -----------------------------------------------------------
@@ -228,11 +229,14 @@ class SourcebornEngine:
         )
         lanes = {
             "reality_path": {"known": live or "needs live source",
-                             "what_would_prove_it": "connect Tavily/web grounding"},
+                             "what_would_prove_it": "live web grounding (Tavily)"},
             "wild_path": {"preserved": channels.get("invention_seed", []) +
                           channels.get("mystery", [])},
             "classification": packet.classification,
             "sequence_path": [n.sb_id for n in SB_NODES[:8]],
+            # citations — every claim is backed below it (the grounding pyramid)
+            "corpus_citations": [m[8:] for m in matched if m.startswith("corpus:")][:5],
+            "wisdom_citations": [m for m in matched if not m.startswith("corpus:")][:5],
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping

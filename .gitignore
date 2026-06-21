@@ -2,6 +2,9 @@
 .sourceborn/
 *.sourceborn/
 
+# Private corpus you feed the brain (your raw thoughts/cores — never commit)
+corpus/
+
 # Python
 __pycache__/
 *.py[cod]

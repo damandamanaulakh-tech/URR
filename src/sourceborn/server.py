@@ -193,7 +193,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
 
 
+def _maybe_ingest_on_boot() -> None:
+    """Deploy-time corpus load: if SB_INGEST_CORPUS points at a folder and the
+    brain is empty, ingest it once (e.g. a Render disk mounted with your cores)."""
+    folder = os.environ.get("SB_INGEST_CORPUS")
+    if folder and os.path.isdir(folder) and \
+            ENGINE.memory.stats().get("total_memory_entries", 0) == 0:
+        from .ingest import ingest_folder
+        stats = ingest_folder(folder, root=os.environ.get("SB_ROOT", ".sourceborn"))
+        print(f"ingested corpus on boot: {stats}")
+
+
 def main() -> None:
+    _maybe_ingest_on_boot()
     port = int(os.environ.get("PORT", "8000"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Sourceborn web service on http://0.0.0.0:{port}  (model: {ENGINE.model.name})")
