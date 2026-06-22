@@ -25,3 +25,9 @@ desktop.ini
 # Scratch
 /tmp_extract/
 *.log
+
+# build artifacts / snapshots
+sourceborn.bundle
+sourceborn_code.zip
+*.zip
+*.bundle
