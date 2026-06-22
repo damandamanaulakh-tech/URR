@@ -266,8 +266,18 @@ class SourcebornEngine:
         # 8. PLACE — build the lanes (URR-07 output lanes) ----------------
         draft = active_model.complete(
             system=self.persona.voice_guidance(),
-            prompt=f"Answer this using the matched examples and live fact.\n"
-                   f"ASK: {raw_text}\nMATCHED: {matched}\nLIVE: {live or 'none'}",
+            prompt=(
+                "Answer the ASK from the deepest matching example, grounded in live "
+                "fact, in the user's voice. Reason top-down from the bigger picture. "
+                "Be honest about gaps; never overclaim.\n"
+                f"ASK: {raw_text}\n"
+                f"MATCHED EXAMPLES (eternal): {matched}\n"
+                f"LIVE FACT: {live or 'none — say so, do not invent'}\n"
+                f"CORE GATE dominant lens: {core['dominant_lens']}; active: "
+                f"{[k for k, v in core['lenses'].items() if v['active']]}\n"
+                f"EVIDENCE: {ladder_conf} (rungs {[e['evidence_tag'] for e in ledger]})\n"
+                "Deliver a clean answer, then one falsifier line."
+            ),
         )
 
         # Stage 3 — Doubt Engine + Witness (SB-20/22): attack before delivery
@@ -284,6 +294,15 @@ class SourcebornEngine:
         if fuel_item:
             self._t("SB-45", "synthetic_fuel", "synthetic_assumption_active",
                     note=fuel_item["fuel"])
+
+        # Stage 7 — Embodied Check (SB-59) + Non-Resolution Protector (SB-57)
+        embodied_ok = not (doubt["bites"] or (bool(halts) and not live))
+        self._t("SB-59", "embodied_check", "passed" if embodied_ok else "held",
+                note="sits right" if embodied_ok else "resistance — re-loop")
+        non_resolution = bool(halts) and not live and doubt["bites"]
+        if non_resolution:                     # Principle 2: holding is valid
+            self._t("SB-57", "non_resolution_protector", "running",
+                    note="valid hold / incubate — do not force a product")
 
         lanes = {
             "reality_path": {"known": live or "needs live source",
@@ -306,6 +325,8 @@ class SourcebornEngine:
             "doubt": doubt,
             "witness": blind,
             "synthetic_fuel": fuel_item,
+            "embodied_check": "sits right" if embodied_ok else "resistance — re-loop",
+            "non_resolution": non_resolution,
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping
@@ -321,12 +342,16 @@ class SourcebornEngine:
             answer=draft,
             lanes=lanes,
             evidence_tag=packet.evidence_tag,
-            classification=packet.classification,
+            classification=(Classification.REVIEW_ONLY.value if non_resolution
+                            else packet.classification),
             confidence="Low" if (doubt["bites"] or gaps or halts) else ladder_conf,
             falsifier=make_falsifier(raw_text),
             penetration_score=(PenetrationScore.PENETRATED.value if deep
                                else PenetrationScore.SHALLOW.value),
-            open_question=channels.get("mystery", [""])[0] if "mystery" in channels else "",
+            open_question=("Held — non-resolution is valid here; needs evidence or "
+                           "incubation (Principle 2)." if non_resolution
+                           else (channels.get("mystery", [""])[0]
+                                 if "mystery" in channels else "")),
             public_safe=public_safe,
             matched_examples=matched,
         )
@@ -346,3 +371,35 @@ class SourcebornEngine:
                     note="example bank +1")
 
         return RunResult(out, micro, matched, list(self.trace), gaps, proofs, halts)
+
+    # -- RGL: Recursive Genesis Loop ---------------------------------------
+    def run_recursive(self, raw_text: str, loops: int = 3,
+                      model: BaseModel | None = None, converge: float = 0.30) -> dict:
+        """The RGL (RGL.txt): the loop's shape is invariant, the content
+        compounds. Each pass's Point Zero carries the previous pass's product;
+        it re-opens up to ``loops`` times, stopping early when the product stops
+        changing (convergence). Only the final pass teaches the clone.
+        """
+        history: list[dict] = []
+        product = ""
+        last: RunResult | None = None
+        converged = False
+        n = max(1, loops)
+        for i in range(n):
+            text = raw_text if not product else (
+                f"{raw_text}\n\n[carry-forward from loop {i}] {product[:400]}")
+            last = self.run(text, learn=(i == n - 1), model=model)
+            history.append({
+                "loop": i + 1, "answer": last.output.answer,
+                "confidence": last.output.confidence,
+                "penetration": last.output.penetration_score,
+            })
+            if product:
+                drift = reality_reanchor(product, last.output.answer).drift_score
+                if drift < converge:
+                    converged = True
+                    product = last.output.answer
+                    break
+            product = last.output.answer
+        return {"result": last, "recursion": {
+            "loop_count": len(history), "converged": converged, "history": history}}

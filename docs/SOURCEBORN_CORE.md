@@ -245,6 +245,31 @@ not the engine itself.
 
 ---
 
+## 9. IMPLEMENTATION STATUS (spec ↔ code)
+
+The engine is built and live (Render web app). Each stage maps to real code:
+
+| Stage / feature | Module |
+|---|---|
+| 1 Intake · Point Zero · noise strip | `engine.py` |
+| 2 Core Gate — six lenses | `core_gate.py` |
+| 3 Doubt Engine · Falsifier · Witness | `doubt.py` |
+| 4 Evidence ladder · source tags | `evidence.py` |
+| 5 Dot-Connection · human-gated Merge | `dots.py` |
+| 6 Synthetic Fuel Injector (5 caged fuels) | `fuel.py` |
+| 7 Risk gate / Reality Re-Anchor / Drift / Embodied / Non-Resolution | `safety.py`, `drift_guard.py`, `engine.py` |
+| 8 Master Log · final output · weekly brain update | `memory.py`, `scheduler.py` |
+| RGL recursive loop | `engine.run_recursive` |
+| 95 local brains + settings | `brains.py` |
+| 3 memories (corpus / wisdom / live) | `persona.py`, `wisdom.py`, `grounding.py` |
+| Base models (Claude / Grok / OpenAI) | `llm.py` |
+| Web app + API + deploy | `server.py`, `app.py`, `render.yaml` |
+
+Open for future depth: real scripture/proverb Wisdom Bank corpus, model-backed URR
+micro-pass, richer interconnection-graph UI.
+
+---
+
 *End of canonical core. The machine-readable version of the node map, parameters,
 halts and loops lives in `src/sourceborn/`. This document and the code are meant to
 stay in sync.*
