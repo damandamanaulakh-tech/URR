@@ -167,6 +167,37 @@ def test_weekly_scheduler_due_then_not():
     assert scheduler.status(root)["last_weekly_update"]
 
 
+def test_doubt_engine_bites_on_overclaim():
+    from sourceborn.doubt import doubt_engine, falsifier, witness
+    d = doubt_engine("This is obviously always true and guaranteed.", False, 0)
+    assert d["bites"] and len(d["fragilities"]) >= 2
+    assert falsifier("x") and witness(["SB-01"], "Mask & Payoff", False)
+
+
+def test_evidence_ladder_rungs():
+    from sourceborn.evidence import build_ledger, ladder_confidence
+    assert ladder_confidence(build_ledger(["c"], True, [])) == "High"      # live -> FACT
+    assert ladder_confidence(build_ledger(["c"], False, ["ref"])) == "Medium"
+    assert ladder_confidence(build_ledger(["c"], False, [])) == "Low"
+
+
+def test_dot_connections_and_merge():
+    from sourceborn.dots import dot_connections, merge_proposal
+    conns = dot_connections([["A", "B"], ["A", "C"], ["A", "B"]])
+    refs = {c["ref"] for c in conns}
+    assert "A" in refs and "B" in refs           # recur across parts
+    assert merge_proposal(conns) is not None     # >=2 connections -> proposal
+    assert merge_proposal([{"ref": "A", "appears_in": 2}]) is None  # 1 -> none
+
+
+def test_synthetic_fuel_diagnose_and_inject():
+    from sourceborn.fuel import diagnose_stall, inject
+    assert diagnose_stall(["Evidence"], False, 3, False) == "Data-stall"
+    assert diagnose_stall([], True, 3, False) is None   # not stuck
+    f = inject("Frame-stall", "an ask")
+    assert f["fuel"] == "Apostatic Inversion" and f["synthetic_tag"]["expiry"]
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

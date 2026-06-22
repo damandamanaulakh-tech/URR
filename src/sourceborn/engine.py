@@ -22,7 +22,11 @@ from typing import Any, Callable
 from . import safety
 from .brains import BrainRegistry
 from .core_gate import six_lenses
+from .doubt import doubt_engine, falsifier as make_falsifier, witness
+from .dots import dot_connections, merge_proposal
 from .drift_guard import reality_reanchor
+from .evidence import build_ledger, ladder_confidence
+from .fuel import diagnose_stall, inject as inject_fuel
 from .grounding import default_grounding
 from .enums import (
     Classification, EvidenceTag, ForceFitRisk, HaltType, LoopType, PenetrationScore,
@@ -198,8 +202,11 @@ class SourcebornEngine:
         # 5. EXAMPLE & WISDOM MATCH (the heart) ---------------------------
         matched: list[str] = []
         seen: set[str] = set()
+        per_part_refs: list[list[str]] = []
         for mq in micro:
+            refs: list[str] = []
             for ex in self.persona.recall(mq):            # reflex (your corpus)
+                refs.append(ex.question[:60])
                 item = f"corpus: {ex.question[:60]}"
                 if item not in seen:
                     seen.add(item); matched.append(item)
@@ -207,12 +214,24 @@ class SourcebornEngine:
                 item = f"{w.source}: {w.pattern[:70]} [axes: {', '.join(axes) or '—'}]"
                 if item not in seen:
                     seen.add(item); matched.append(item)
+            per_part_refs.append(refs)
         self.memory.write("SB-32", MemoryEntry(
             node_id="SB-32", raw_source_id=raw.raw_source_id,
             content="example & wisdom match", parameters={"matched": matched},
             tags=["example_match"],
         ), name="Literature & Historical Pattern Hunter")
         self._t("SB-32", "example_wisdom_match", "running", note=f"{len(matched)} matches")
+
+        # 5b. DOT CONNECTION + MERGE (SB-37/40): sources recurring across parts
+        connections = dot_connections(per_part_refs)
+        merge = merge_proposal(connections)
+        if connections:
+            self._t("SB-37", "dot_connection", "running",
+                    note=f"{len(connections)} cross-links")
+        if merge:
+            self.memory.master_log({"event": "merge_proposal",
+                                    "contributing": merge["contributing"]})
+            self._t("SB-40", "merge_proposal", "held", note="needs human gate")
 
         # 6. LIVE GROUNDING — SB-33 (pluggable eyes) ----------------------
         live = self.grounding(raw_text)
@@ -221,6 +240,13 @@ class SourcebornEngine:
                                 LoopType.EVIDENCE.value))
         self._t("SB-33", "live_grounding", "running" if live else "gap_open",
                 note="live data" if live else "no live source")
+
+        # Stage 4 — Evidence ladder + source tags (SB-29)
+        corpus_refs = [m[8:] for m in matched if m.startswith("corpus:")]
+        ledger = build_ledger(micro, bool(live), corpus_refs)
+        ladder_conf = ladder_confidence(ledger)
+        self._t("SB-29", "evidence_ledger", "running",
+                note=f"ladder confidence {ladder_conf}")
 
         # 7. URR VERIFY ----------------------------------------------------
         packet = self.urr_micropass("URR-08", "SB-08", raw_text)
@@ -243,6 +269,22 @@ class SourcebornEngine:
             prompt=f"Answer this using the matched examples and live fact.\n"
                    f"ASK: {raw_text}\nMATCHED: {matched}\nLIVE: {live or 'none'}",
         )
+
+        # Stage 3 — Doubt Engine + Witness (SB-20/22): attack before delivery
+        doubt = doubt_engine(draft, bool(live), len(matched))
+        blind = witness([t.node_id for t in self.trace],
+                        core["dominant_lens"], bool(live))
+        self._t("SB-20", "doubt_engine", "held" if doubt["bites"] else "passed",
+                note=doubt["verdict"])
+        self._t("SB-22", "witness", "running", note=blind[0])
+
+        # Stage 6 — Synthetic Fuel if stalled (SB-45): force motion, never fake fact
+        stall = diagnose_stall(halts, bool(live), len(matched), doubt["bites"])
+        fuel_item = inject_fuel(stall, raw_text) if stall else None
+        if fuel_item:
+            self._t("SB-45", "synthetic_fuel", "synthetic_assumption_active",
+                    note=fuel_item["fuel"])
+
         lanes = {
             "reality_path": {"known": live or "needs live source",
                              "what_would_prove_it": "live web grounding (Tavily)"},
@@ -257,6 +299,13 @@ class SourcebornEngine:
             "human_layer": {"dominant_lens": core["dominant_lens"],
                             "active": {k: v["reading"] for k, v in
                                        core["lenses"].items() if v["active"]}},
+            # Stage 3-6 depth
+            "evidence_ledger": ledger,
+            "connections": connections,
+            "merge_proposal": merge,
+            "doubt": doubt,
+            "witness": blind,
+            "synthetic_fuel": fuel_item,
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping
@@ -273,8 +322,8 @@ class SourcebornEngine:
             lanes=lanes,
             evidence_tag=packet.evidence_tag,
             classification=packet.classification,
-            confidence="Low" if (gaps or halts) else "Medium",
-            falsifier="What live fact would disprove the matched example?",
+            confidence="Low" if (doubt["bites"] or gaps or halts) else ladder_conf,
+            falsifier=make_falsifier(raw_text),
             penetration_score=(PenetrationScore.PENETRATED.value if deep
                                else PenetrationScore.SHALLOW.value),
             open_question=channels.get("mystery", [""])[0] if "mystery" in channels else "",
