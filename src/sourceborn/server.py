@@ -184,6 +184,13 @@ function render(d){
       '<div class=lane><b>Wild path (preserved)</b> '+esc(JSON.stringify((lanes.wild_path||{}).preserved||[]))+'</div>'+
       '<div class=lane><b>Re-anchor</b> '+esc(lanes.reality_reanchor||'')+'</div>'+
       (lanes.safety?'<div class=lane><b class=hl>Safety</b> '+esc(JSON.stringify(lanes.safety))+'</div>':'')+'</div>'+
+    '<div class=card><div class=k>Truth & evidence (Stages 3–6)</div>'+
+      '<div class=lane><b>Doubt Engine</b> '+esc((lanes.doubt||{}).verdict||'—')+' · '+(((lanes.doubt||{}).fragilities)||[]).length+' fragilities</div>'+
+      '<div class=lane><b>Witness</b> '+esc(((lanes.witness||[])[0])||'—')+'</div>'+
+      '<div class=lane><b>Evidence ladder</b> '+esc(((lanes.evidence_ledger||[]).map(e=>e.evidence_tag).join(', '))||'—')+'</div>'+
+      ((lanes.connections||[]).length?'<div class=lane><b>Dot-connections</b> '+esc((lanes.connections||[]).map(c=>c.ref+' ×'+c.appears_in).join(', '))+'</div>':'')+
+      (lanes.merge_proposal?'<div class=lane><b class=hl>Merge proposed</b> '+esc((lanes.merge_proposal.contributing||[]).join(' + '))+' · needs human gate</div>':'')+
+      (lanes.synthetic_fuel?'<div class=lane><b>Synthetic fuel</b> ['+esc(lanes.synthetic_fuel.stall)+'] '+esc(lanes.synthetic_fuel.fuel)+' <span class=tag>SYNTHETIC</span></div>':'')+'</div>'+
     (d.halts&&d.halts.length?'<div class=card><div class=k>Halts → loops opened</div><span class=hl>'+esc(d.halts.join(', '))+'</span></div>':'')+
     '<details><summary>engine trace ('+(d.trace||[]).length+' nodes) & memory</summary>'+
       '<div class=card><div class=trace>'+tr+'</div><div class=muted style="margin-top:10px">memory: '+
