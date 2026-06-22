@@ -215,6 +215,23 @@ def test_stage7_embodied_and_non_resolution_present():
     assert any(t.node_id == "SB-59" for t in res.trace)   # Embodied Check fired
 
 
+def test_default_model_prefers_env_pref():
+    import os
+    from sourceborn import llm
+    keys = ("ANTHROPIC_API_KEY", "XAI_API_KEY", "SB_DEFAULT_MODEL")
+    old = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["ANTHROPIC_API_KEY"] = "a"
+        os.environ["XAI_API_KEY"] = "x"
+        os.environ["SB_DEFAULT_MODEL"] = "grok"
+        assert llm.default_model().name == "grok"      # env pref wins
+        del os.environ["SB_DEFAULT_MODEL"]
+        assert llm.default_model().name == "claude"    # else first in order
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

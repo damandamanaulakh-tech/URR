@@ -158,7 +158,11 @@ def model_status() -> dict[str, bool]:
 
 
 def default_model() -> BaseModel:
-    for key in ("claude", "grok", "openai"):
+    """Pick the default model. Honour SB_DEFAULT_MODEL first (e.g. "grok" when
+    that's the key with credit), then fall back through the usual order."""
+    pref = os.environ.get("SB_DEFAULT_MODEL", "").strip().lower()
+    order = ([pref] if pref in _REGISTRY else []) + ["claude", "grok", "openai"]
+    for key in order:
         m = _REGISTRY[key]()
         if getattr(m, "available", False):
             return m
