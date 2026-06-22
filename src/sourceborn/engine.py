@@ -266,8 +266,18 @@ class SourcebornEngine:
         # 8. PLACE — build the lanes (URR-07 output lanes) ----------------
         draft = active_model.complete(
             system=self.persona.voice_guidance(),
-            prompt=f"Answer this using the matched examples and live fact.\n"
-                   f"ASK: {raw_text}\nMATCHED: {matched}\nLIVE: {live or 'none'}",
+            prompt=(
+                "Answer the ASK from the deepest matching example, grounded in live "
+                "fact, in the user's voice. Reason top-down from the bigger picture. "
+                "Be honest about gaps; never overclaim.\n"
+                f"ASK: {raw_text}\n"
+                f"MATCHED EXAMPLES (eternal): {matched}\n"
+                f"LIVE FACT: {live or 'none — say so, do not invent'}\n"
+                f"CORE GATE dominant lens: {core['dominant_lens']}; active: "
+                f"{[k for k, v in core['lenses'].items() if v['active']]}\n"
+                f"EVIDENCE: {ladder_conf} (rungs {[e['evidence_tag'] for e in ledger]})\n"
+                "Deliver a clean answer, then one falsifier line."
+            ),
         )
 
         # Stage 3 — Doubt Engine + Witness (SB-20/22): attack before delivery
