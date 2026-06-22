@@ -16,7 +16,7 @@ the clone one more example (it gets wiser with use).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from . import safety
@@ -52,6 +52,24 @@ class RunResult:
     gaps: list[GapItem]
     proofs: list[ProofItem]
     halts: list[str]
+
+
+@dataclass
+class NodeStep:
+    """One SB checkpoint in the SB<->URR walk (your core loop diagram):
+    the SB node does its work, a URR review verifies *that* node, and the node
+    downloads the URR intake into its own memory before the walk advances
+    (SB-N -> URR-N -> SB-N absorbs intake -> SB-N+1). A held node can be looped
+    back to from the human review queue."""
+    sb_id: str
+    sb_name: str
+    action: str
+    urr_id: str
+    verdict: str            # "pass" | "hold"
+    halt: str | None
+    why: str
+    memory_written: bool
+    can_loop_back: bool
 
 
 class SourcebornEngine:
@@ -107,10 +125,12 @@ class SourcebornEngine:
 
     # -- URR micro-pass ----------------------------------------------------
     def urr_micropass(self, urr_id: str, sb_node_id: str, content: str,
-                      synthetic: bool = False) -> URRPacket:
+                      synthetic: bool = False, live: str | None = None) -> URRPacket:
         """A verification gate: classify, score force-fit, detect halts.
 
         This is the rule-based URR. A model-backed URR can subclass / replace it.
+        ``live`` lets a caller pass already-resolved live fact (or human-added
+        data) so the evidence check honours it instead of re-querying.
         """
         low = content.lower()
         classification = Classification.CLAIM.value
@@ -124,8 +144,9 @@ class SourcebornEngine:
         if any(w in low for w in ("always", "everyone", "never", "guaranteed", "obviously")):
             force_fit = ForceFitRisk.HIGH.value
             halt = HaltType.LOGIC.value
+        has_live = live if live is not None else self.grounding(content)
         if any(w in low for w in ("proof", "evidence", "data", "fact", "current")):
-            if not self.grounding(content):
+            if not has_live:
                 halt = HaltType.EVIDENCE.value
         verdict = safety.check(content)
         risk_flags: list[str] = []
@@ -143,7 +164,8 @@ class SourcebornEngine:
 
     # -- the run -----------------------------------------------------------
     def run(self, raw_text: str, origin: str = "chat", public_safe: bool = False,
-            learn: bool = True, model: BaseModel | None = None) -> RunResult:
+            learn: bool = True, model: BaseModel | None = None,
+            live_override: str | None = None) -> RunResult:
         active_model = model or self.model
         self.trace = []
         gaps: list[GapItem] = []
@@ -233,8 +255,8 @@ class SourcebornEngine:
                                     "contributing": merge["contributing"]})
             self._t("SB-40", "merge_proposal", "held", note="needs human gate")
 
-        # 6. LIVE GROUNDING — SB-33 (pluggable eyes) ----------------------
-        live = self.grounding(raw_text)
+        # 6. LIVE GROUNDING — SB-33 (pluggable eyes; human-added data wins) -
+        live = live_override or self.grounding(raw_text)
         if not live and deep:
             gaps.append(GapItem("No live fact source connected", "Evidence", "Medium",
                                 LoopType.EVIDENCE.value))
@@ -249,7 +271,7 @@ class SourcebornEngine:
                 note=f"ladder confidence {ladder_conf}")
 
         # 7. URR VERIFY ----------------------------------------------------
-        packet = self.urr_micropass("URR-08", "SB-08", raw_text)
+        packet = self.urr_micropass("URR-08", "SB-08", raw_text, live=live)
         if packet.halt_triggered:
             halts.append(packet.halt_type or "")
             loop = loop_for_halt(HaltType(packet.halt_type))
@@ -403,3 +425,77 @@ class SourcebornEngine:
             product = last.output.answer
         return {"result": last, "recursion": {
             "loop_count": len(history), "converged": converged, "history": history}}
+
+    # -- the real loop: per-node SB <-> URR walk (your core diagram) --------
+    @staticmethod
+    def _walk_why(t: TraceEntry, packet: URRPacket) -> str:
+        """Plain-language reason a node passed or is held — so 'Low' is never
+        mysterious and every hold tells you exactly what to do."""
+        h = packet.halt_type or t.halt or ""
+        if t.node_id == "SB-33" and t.status == "gap_open":
+            return "No live source connected — paste the data or set a Tavily key."
+        if h == HaltType.EVIDENCE.value:
+            return "Claim needs current data to verify — add a source in review."
+        if h == HaltType.SAFETY.value:
+            return "Safety boundary — mapped, never executed."
+        if h == HaltType.LOGIC.value:
+            return "Over-claim (always/never/guaranteed) — soften or prove it."
+        if t.node_id == "SB-40":
+            return "Merge proposed — needs your approval before combining."
+        if t.node_id == "SB-20" and t.status == "held":
+            return "Doubt bit — the claim is fragile; re-examine."
+        if t.node_id == "SB-58" and t.status == "held":
+            return "Drifted from Point Zero — re-anchor to your original ask."
+        if t.node_id == "SB-59" and t.status == "held":
+            return "Embodied resistance — doesn't sit right yet; re-loop."
+        return "Clear."
+
+    def run_walk(self, raw_text: str, model: BaseModel | None = None,
+                 live_override: str | None = None) -> dict:
+        """Walk the fired SB checkpoints one by one. After each SB node a URR
+        review verifies *that* node, then the node downloads the URR intake into
+        its own memory before the walk advances — your loop, literally:
+
+            SB-N -> URR-N (review + verdict) -> SB-N absorbs intake -> SB-N+1
+
+        Auto-run, review-after: nothing pauses; every URR *hold* is collected in
+        ``holds`` for the human review queue (approve / add data / re-loop).
+        """
+        res = self.run(raw_text, model=model, live_override=live_override)
+        steps: list[NodeStep] = []
+        holds: list[dict] = []
+        seen: set[str] = set()
+        urr_n = 0
+        for t in res.trace:
+            if not t.node_id.startswith("SB-") or t.node_id in seen:
+                continue
+            seen.add(t.node_id)
+            urr_n += 1
+            urr_id = f"URR-{urr_n:02d}"
+            forced_hold = t.status in ("held", "gap_open") or bool(t.halt)
+            # URR review of THIS node's output (its trace note)
+            packet = self.urr_micropass(urr_id, t.node_id, t.note or t.action,
+                                        live=live_override)
+            verdict = "hold" if (forced_hold or packet.halt_triggered) else "pass"
+            why = self._walk_why(t, packet)
+            # SB node downloads the URR intake into its own memory (your "->Memory")
+            self.memory.write(t.node_id, MemoryEntry(
+                node_id=t.node_id, raw_source_id="",
+                content=f"URR intake [{verdict}]: {why}",
+                parameters={"urr_id": urr_id, "verdict": verdict},
+                tags=["urr_intake"]), name="URR Intake Download")
+            cfg = self.brains.get(t.node_id)
+            step = NodeStep(
+                sb_id=t.node_id, sb_name=(cfg.name if cfg else t.action),
+                action=t.action, urr_id=urr_id, verdict=verdict,
+                halt=packet.halt_type or t.halt, why=why,
+                memory_written=True, can_loop_back=(verdict == "hold"))
+            steps.append(step)
+            if verdict == "hold":
+                holds.append({"sb_id": step.sb_id, "name": step.sb_name,
+                              "urr_id": urr_id, "why": why, "halt": step.halt})
+        self.memory.master_log({"event": "walk_complete",
+                                "nodes": len(steps), "holds": len(holds)})
+        return {"result": res, "walk": {
+            "steps": [asdict(s) for s in steps], "holds": holds,
+            "node_count": len(steps), "hold_count": len(holds)}}
