@@ -16,7 +16,7 @@ local brains** (70 SB + 25 URR nodes), and **gets wiser every time you use it**.
 ```bash
 python -m sourceborn.demo                 # full offline walkthrough
 python -m sourceborn "why does the small idea win? prove it"
-PYTHONPATH=src python3 tests/test_engine.py   # 9 tests
+PYTHONPATH=src python3 tests/test_engine.py   # 25 tests
 ```
 Set `ANTHROPIC_API_KEY` to swap the offline stub for real Claude reasoning.
 
@@ -54,10 +54,23 @@ python -c "import sys; sys.path.insert(0,'src'); from sourceborn.ingest import i
 
 Your private brain is written to `.sourceborn/` (git-ignored — never committed).
 
-## Status
-**Phase 1 (ownable core) is done and tested.** Phase 2 = wire your Claude key +
-Tavily + build out the Wisdom Bank / Example-Match heart. Phase 3 = a private UI
-(Lovable on top, or local). See `docs/RECOMMENDATION.md`.
+## What's implemented (all 8 stages real, not scaffolded)
+- **Stage 1** intake: raw-source lock, noise strip, Point Zero
+- **Stage 2** Core Gate — six lenses (`core_gate.py`) → human-layer read
+- **Stage 3** Doubt Engine · Falsifier · Witness (`doubt.py`)
+- **Stage 4** Evidence ladder + source tags (`evidence.py`)
+- **Stage 5** Dot-Connection + human-gated Merge (`dots.py`)
+- **Stage 6** Synthetic Fuel Injector — 5 caged fuels (`fuel.py`)
+- **Stage 7** Risk gate (`safety.py`), Reality Re-Anchor + Drift Control (`drift_guard.py`), Embodied Check, Non-Resolution Protector
+- **Stage 8** Master Log, final output, weekly brain update (`scheduler.py`)
+- **RGL** recursive loop (`engine.run_recursive`) — compounds over N loops
+- **95 local brains** with full settings (`brains.py`); 3 memories (corpus/wisdom/live)
+- **CI**: GitHub Actions runs the 25-test suite on every push/PR
+
+## HTTP API
+`GET /` UI · `GET /health` · `POST /ask {question,model,loops,public}` ·
+`POST /ingest {name,text}` · `GET /brains` · `GET /brain?id=` ·
+`POST /brain/settings` · `POST /brains/update` · `GET /graph`
 
 Lineage: Raw Definition Engine → ARD / RGL → URR-07 → Secureborn → Sourceborn / SBUR
-→ the 70-SB/25-URR "Omni" core. MIT licensed.
+→ the 70-SB/25-URR "Omni" core. MIT licensed. See `docs/RECOMMENDATION.md`.

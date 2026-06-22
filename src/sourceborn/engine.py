@@ -285,6 +285,15 @@ class SourcebornEngine:
             self._t("SB-45", "synthetic_fuel", "synthetic_assumption_active",
                     note=fuel_item["fuel"])
 
+        # Stage 7 — Embodied Check (SB-59) + Non-Resolution Protector (SB-57)
+        embodied_ok = not (doubt["bites"] or (bool(halts) and not live))
+        self._t("SB-59", "embodied_check", "passed" if embodied_ok else "held",
+                note="sits right" if embodied_ok else "resistance — re-loop")
+        non_resolution = bool(halts) and not live and doubt["bites"]
+        if non_resolution:                     # Principle 2: holding is valid
+            self._t("SB-57", "non_resolution_protector", "running",
+                    note="valid hold / incubate — do not force a product")
+
         lanes = {
             "reality_path": {"known": live or "needs live source",
                              "what_would_prove_it": "live web grounding (Tavily)"},
@@ -306,6 +315,8 @@ class SourcebornEngine:
             "doubt": doubt,
             "witness": blind,
             "synthetic_fuel": fuel_item,
+            "embodied_check": "sits right" if embodied_ok else "resistance — re-loop",
+            "non_resolution": non_resolution,
         }
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping
@@ -321,12 +332,16 @@ class SourcebornEngine:
             answer=draft,
             lanes=lanes,
             evidence_tag=packet.evidence_tag,
-            classification=packet.classification,
+            classification=(Classification.REVIEW_ONLY.value if non_resolution
+                            else packet.classification),
             confidence="Low" if (doubt["bites"] or gaps or halts) else ladder_conf,
             falsifier=make_falsifier(raw_text),
             penetration_score=(PenetrationScore.PENETRATED.value if deep
                                else PenetrationScore.SHALLOW.value),
-            open_question=channels.get("mystery", [""])[0] if "mystery" in channels else "",
+            open_question=("Held — non-resolution is valid here; needs evidence or "
+                           "incubation (Principle 2)." if non_resolution
+                           else (channels.get("mystery", [""])[0]
+                                 if "mystery" in channels else "")),
             public_safe=public_safe,
             matched_examples=matched,
         )

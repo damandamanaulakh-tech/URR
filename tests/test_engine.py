@@ -207,6 +207,14 @@ def test_rgl_recursive_loop():
     assert "converged" in rec["recursion"]
 
 
+def test_stage7_embodied_and_non_resolution_present():
+    eng = _engine()
+    res = eng.run("prove this with current data")
+    assert "embodied_check" in res.output.lanes
+    assert "non_resolution" in res.output.lanes
+    assert any(t.node_id == "SB-59" for t in res.trace)   # Embodied Check fired
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

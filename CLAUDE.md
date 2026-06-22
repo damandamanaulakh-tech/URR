@@ -44,5 +44,11 @@ When they disagree, surface it — do not silently pick one.
 - The user's private brain lives in `.sourceborn/` and is git-ignored — never commit it.
 
 ## Build state
-Phase 1 (ownable core) done + tested. Phase 2 = wire Claude key + Tavily + Wisdom Bank /
-Example-Match heart + ingest corpus. Phase 3 = UI (Lovable on top, or local).
+Live on Render as a web app. All 8 SB stages implemented (Core Gate 6 lenses,
+Doubt/Falsifier/Witness, Evidence ladder, Dot-Connection/Merge, Synthetic Fuel,
+Risk/Embodied/Non-Resolution, output + weekly update), the RGL recursive loop, 95
+configured node brains, 3 memories (corpus/wisdom/live fact), multi-model
+(Claude/Grok/OpenAI), corpus ingest + persistent disk, CI green (25 tests).
+Next candidates: real scripture Wisdom Bank, model-backed URR micro-pass, richer
+interconnection graph UI. The user authorized building forward without per-step
+approval — keep shipping in tested PRs, stay on the core, keep the safety line.
