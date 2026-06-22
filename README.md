@@ -63,14 +63,20 @@ Your private brain is written to `.sourceborn/` (git-ignored — never committed
 - **Stage 6** Synthetic Fuel Injector — 5 caged fuels (`fuel.py`)
 - **Stage 7** Risk gate (`safety.py`), Reality Re-Anchor + Drift Control (`drift_guard.py`), Embodied Check, Non-Resolution Protector
 - **Stage 8** Master Log, final output, weekly brain update (`scheduler.py`)
-- **RGL** recursive loop (`engine.run_recursive`) — compounds over N loops
+- **The loop** (`engine.run_walk`) — the real per-node walk: `SB-N → URR-N
+  (review + verdict) → SB-N downloads the URR intake into memory → SB-N+1`.
+  Auto-runs the whole chain, then every URR **hold** goes to a **human review
+  queue** (approve / add data / re-loop). `run_recursive` (RGL) is kept too.
 - **95 local brains** with full settings (`brains.py`); 3 memories (corpus/wisdom/live)
-- **CI**: GitHub Actions runs the 25-test suite on every push/PR
+- **CI**: GitHub Actions runs the test suite on every push/PR
 
 ## HTTP API
-`GET /` UI · `GET /health` · `POST /ask {question,model,loops,public}` ·
-`POST /ingest {name,text}` · `GET /brains` · `GET /brain?id=` ·
-`POST /brain/settings` · `POST /brains/update` · `GET /graph`
+`GET /` UI · `GET /health` · `POST /ask {question,model,public}` (runs the
+per-node SB↔URR walk; returns `walk.steps` + `walk.holds`) ·
+`POST /review {question,id,action,data}` — the human review queue,
+action = `approve` / `add_data` / `reloop` · `POST /ingest {name,text}` ·
+`GET /brains` · `GET /brain?id=` · `POST /brain/settings` ·
+`POST /brains/update` · `GET /graph`
 
 Lineage: Raw Definition Engine → ARD / RGL → URR-07 → Secureborn → Sourceborn / SBUR
 → the 70-SB/25-URR "Omni" core. MIT licensed. See `docs/RECOMMENDATION.md`.

@@ -69,7 +69,9 @@ class NodeBrain:
     def read_all(self) -> list[MemoryEntry]:
         out: list[MemoryEntry] = []
         for fn in sorted(os.listdir(self.dir)):
-            if fn.endswith(".json") and fn != "_brain.json":
+            # memory entries are <entry_id>.json; skip _brain.json / _config.json
+            # and any other underscore-prefixed metadata sharing the node folder
+            if fn.endswith(".json") and not fn.startswith("_"):
                 with open(os.path.join(self.dir, fn), encoding="utf-8") as f:
                     out.append(MemoryEntry(**json.load(f)))
         return out

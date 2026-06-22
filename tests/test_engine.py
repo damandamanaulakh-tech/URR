@@ -207,6 +207,37 @@ def test_rgl_recursive_loop():
     assert "converged" in rec["recursion"]
 
 
+def test_run_walk_per_node_urr_and_holds():
+    eng = _engine()
+    w = eng.run_walk("prove with current data that the small idea wins")
+    walk = w["walk"]
+    assert w["result"].output.answer
+    assert walk["node_count"] == len(walk["steps"]) >= 5
+    # every step is an SB node with its own URR review + memory write-back
+    for s in walk["steps"]:
+        assert s["sb_id"].startswith("SB-")
+        assert s["urr_id"].startswith("URR-")
+        assert s["verdict"] in ("pass", "hold")
+        assert s["memory_written"] is True
+        assert s["why"]
+    # offline + "current data" -> at least one hold (no live source), loop-back-able
+    assert walk["hold_count"] == len(walk["holds"]) >= 1
+    assert all(h["sb_id"] for h in walk["holds"])
+    # the SB node downloaded the URR intake into its own memory
+    assert any("urr_intake" in e.tags
+               for e in eng.memory.brain("SB-33").read_all())
+
+
+def test_add_data_clears_evidence_hold():
+    eng = _engine()
+    before = eng.run_walk("prove with current data this is true")["walk"]
+    # human pastes a source -> evidence hold should clear / confidence should rise
+    after = eng.run_walk("prove with current data this is true",
+                         live_override="2026 dataset: confirmed, n=10000, p<0.01")
+    assert after["result"].output.confidence != "Low" or \
+        after["walk"]["hold_count"] < before["hold_count"]
+
+
 def test_stage7_embodied_and_non_resolution_present():
     eng = _engine()
     res = eng.run("prove this with current data")

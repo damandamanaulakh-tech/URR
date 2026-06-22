@@ -138,6 +138,11 @@ button.primary:disabled{opacity:.6;cursor:default;transform:none}
 .lane{border-left:2px solid var(--line2);padding:4px 0 4px 13px;margin:8px 0;color:var(--ink)}
 .lane b{color:#cdd5e6}
 .fals{margin-top:10px;color:var(--mut);font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+.why{margin-top:11px;font-size:13.5px;color:#ffe2a3;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);border-radius:10px;padding:9px 12px}
+.vd{font-size:11px}.vd.pass{color:var(--ok)}.vd.hold{color:var(--warn)}
+.memok{font-size:11px;color:var(--gd);margin-left:6px}
+.hold{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:12px;margin:9px 0}
+.hactions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .tag{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:2px 10px;margin:3px 4px 0 0;font-size:12px;color:var(--mut)}
 .hl{color:var(--hl)}.gd{color:var(--gd)}.muted{color:var(--mut)}
 .pyr{display:flex;flex-direction:column;gap:5px;align-items:center}
@@ -185,7 +190,6 @@ details[open]>summary:before{content:"\25be  "}
       <div class=toolbar>
         <button id=go class=primary onclick=ask()><span id=goico>&#9654;</span><span id=golbl>Run engine</span></button>
         <span class=field><select id=model title="base model"></select></span>
-        <span class=field title="RGL: compound over N loops">loops <input type=number id=loops value=1 min=1 max=6></span>
         <label class=switch><input type=checkbox id=pub><span class=track></span> public-safe</label>
         <span class=status id=status></span>
       </div>
@@ -268,16 +272,42 @@ function busy(on){
   ic.className=on?'spin':''; ic.innerHTML=on?'':'&#9654;';
   document.getElementById('status').textContent=on?'running SB + URR…':'';
 }
+let LASTQ='';
 async function ask(){
-  const q=document.getElementById('q').value.trim(); if(!q)return; busy(true);
+  const q=document.getElementById('q').value.trim(); if(!q)return; busy(true); LASTQ=q;
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value,loops:+document.getElementById('loops').value})});
+      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value})});
     const d=await r.json(); render(d);
     HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
   }catch(e){document.getElementById('out').innerHTML='<div class=card>error: '+esc(''+e)+'</div>'}
   busy(false);
 }
+function tally(arr){const m={};(arr||[]).forEach(x=>m[x]=(m[x]||0)+1);
+  return Object.entries(m).map(([k,v])=>esc(k)+(v>1?' ×'+v:'')).join(', ')||'—';}
+function confWhy(d){const o=d.output||{}; if((''+o.confidence).toLowerCase()!=='low')return '';
+  const holds=(d.walk&&d.walk.holds)||[];
+  if(holds.length)return 'Low because '+holds.length+' node'+(holds.length>1?'s':'')+' held — e.g. '+esc(holds[0].why)+' Clear it in the review queue to raise confidence.';
+  return 'Low — doubt bit or an open gap; see the node walk below.';}
+function walkCard(d){const w=d.walk; if(!w||!w.steps)return '';
+  const rows=w.steps.map(s=>'<div class=lane><span class="vd '+s.verdict+'">●</span> <b>'+esc(s.sb_id)+'</b> '+esc(s.sb_name)+' → '+esc(s.urr_id)+': <b>'+esc(s.verdict)+'</b>'+(s.memory_written?' <span class=memok>memory ✓</span>':'')+'<br><span class=muted style="margin-left:18px">'+esc(s.why)+'</span></div>').join('');
+  return '<div class=card><div class=k>Node walk · SB ↔ URR <span class=num>'+w.node_count+' nodes · '+w.hold_count+' holds</span></div>'+rows+'</div>';}
+function reviewQueue(d){const h=(d.walk&&d.walk.holds)||[]; if(!h.length)return '';
+  const cards=h.map(x=>'<div class=hold><div><b>'+esc(x.sb_id)+'</b> '+esc(x.name)+' <span class="badge warn">hold</span></div>'+
+    '<div class=muted style="margin:4px 0">'+esc(x.why)+'</div>'+
+    '<textarea class="in" id="hd_'+esc(x.sb_id)+'" placeholder="paste data / source (optional), then Add data & re-run" style="min-height:46px"></textarea>'+
+    '<div class=hactions><button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'add_data\')">Add data & re-run</button>'+
+    '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'reloop\')">Re-loop</button>'+
+    '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'approve\')">Approve</button></div></div>').join('');
+  return '<div class=card><div class=k>Human review queue <span class=num>'+h.length+'</span></div>'+
+    '<div class=muted style="margin-bottom:8px">Each held node is yours to clear: add the missing data, re-loop, or approve as-is.</div>'+cards+'</div>';}
+async function review(id,action){
+  const ta=document.getElementById('hd_'+id); const data=ta?ta.value.trim():'';
+  const st=document.getElementById('out'); st.style.opacity=.5;
+  try{const r=await fetch('/review',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({question:LASTQ,id,action,data,model:document.getElementById('model').value})});
+    const d=await r.json(); if(d.resolved){st.style.opacity=1; return;} render(d);
+  }catch(e){}; st.style.opacity=1;}
 function render(d){
   const o=d.output||{},lanes=o.lanes||{};
   const firedStages=new Set(),counts={};
@@ -288,7 +318,6 @@ function render(d){
     return esc((t.node_id||'').padEnd(7))+' '+esc((t.action||'').padEnd(20))+' '+esc(t.status)+h+'  '+esc(t.note||'')}).join('<br>');
   document.getElementById('out').innerHTML=
     '<div class=fade>'+
-    (d.recursion?('<div class=card><div class=k>RGL · '+d.recursion.loop_count+' loops'+(d.recursion.converged?' · converged':'')+'</div>'+(d.recursion.history||[]).map(h=>'<div class=lane>loop '+h.loop+' · '+esc(h.confidence)+'/'+esc(h.penetration)+' · '+esc((h.answer||'').slice(0,90))+'</div>').join('')+'</div>'):'')+
     '<div class=card><div class=k>Answer</div><div class=ans>'+esc(o.answer)+'</div>'+
       '<div class=meter><i style="width:'+confPct(o.confidence)+'%"></i></div>'+
       '<div class=badges><span class=badge>'+esc(o.classification)+'</span>'+
@@ -296,7 +325,9 @@ function render(d){
       '<span class="badge '+confClass(o.confidence)+'">confidence <b>'+esc(o.confidence)+'</b></span>'+
       '<span class=badge>penetration <b>'+esc(o.penetration_score)+'</b></span>'+
       (o.public_safe?'<span class=badge>public-safe</span>':'')+'</div>'+
+      (confWhy(d)?'<div class=why>'+confWhy(d)+'</div>':'')+
       '<div class=fals>falsifier · '+esc(o.falsifier)+'</div></div>'+
+    walkCard(d)+reviewQueue(d)+
     '<div class=card><div class=k>Eternal example & wisdom match</div>'+m+'</div>'+
     '<div class=card><div class=k>Core Gate · human layer (SB-10)</div>'+
       '<div class=lane>dominant lens: <b>'+esc((lanes.human_layer||{}).dominant_lens||'—')+'</b></div>'+
@@ -309,7 +340,7 @@ function render(d){
     '<div class=card><div class=k>Truth & evidence (Stages 3–6)</div>'+
       '<div class=lane><b>Doubt Engine</b> '+esc((lanes.doubt||{}).verdict||'—')+' · '+(((lanes.doubt||{}).fragilities)||[]).length+' fragilities</div>'+
       '<div class=lane><b>Witness</b> '+esc(((lanes.witness||[])[0])||'—')+'</div>'+
-      '<div class=lane><b>Evidence ladder</b> '+esc(((lanes.evidence_ledger||[]).map(e=>e.evidence_tag).join(', '))||'—')+'</div>'+
+      '<div class=lane><b>Evidence ladder</b> '+tally((lanes.evidence_ledger||[]).map(e=>e.evidence_tag))+'</div>'+
       ((lanes.connections||[]).length?'<div class=lane><b>Dot-connections</b> '+esc((lanes.connections||[]).map(c=>c.ref+' ×'+c.appears_in).join(', '))+'</div>':'')+
       (lanes.merge_proposal?'<div class=lane><b class=hl>Merge proposed</b> '+esc((lanes.merge_proposal.contributing||[]).join(' + '))+' · needs human gate</div>':'')+
       (lanes.synthetic_fuel?'<div class=lane><b>Synthetic fuel</b> ['+esc(lanes.synthetic_fuel.stall)+'] '+esc(lanes.synthetic_fuel.fuel)+' <span class=tag>SYNTHETIC</span></div>':'')+'</div>'+
@@ -464,6 +495,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "config": asdict(cfg)}).encode(),
                        "application/json")
             return
+        if self.path == "/review":          # act on a URR hold (review-after)
+            self._review(data)
+            return
         if self.path != "/ask":
             self._send(404, b'{"error":"not found"}', "application/json")
             return
@@ -473,26 +507,52 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, b'{"error":"empty question"}', "application/json")
                 return
             model = get_model(data.get("model", "offline"))
-            loops = max(1, min(int(data.get("loops", 1) or 1), 6))
-            recursion = None
-            if loops > 1:                       # RGL: compound over N loops
-                rec = ENGINE.run_recursive(question, loops=loops, model=model)
-                res, recursion = rec["result"], rec["recursion"]
-            else:
-                res = ENGINE.run(question, public_safe=bool(data.get("public")), model=model)
-            payload = {
-                "output": asdict(res.output),
-                "micro_questions": res.micro_questions,
-                "matched_examples": res.matched_examples,
-                "trace": [asdict(t) for t in res.trace],
-                "halts": res.halts,
-                "memory": ENGINE.memory.stats(),
-                "model": model.name,
-                "recursion": recursion,
-            }
-            self._send(200, json.dumps(payload).encode(), "application/json")
+            # The real loop: per-node SB <-> URR walk + human review queue.
+            walk = ENGINE.run_walk(question, model=model)
+            res = walk["result"]
+            self._send(200, self._walk_payload(res, walk, model.name), "application/json")
         except Exception as exc:
             self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+
+    # -- shared payload + review actions ----------------------------------
+    @staticmethod
+    def _walk_payload(res, walk, model_name: str) -> bytes:
+        return json.dumps({
+            "output": asdict(res.output),
+            "micro_questions": res.micro_questions,
+            "matched_examples": res.matched_examples,
+            "trace": [asdict(t) for t in res.trace],
+            "halts": res.halts,
+            "memory": ENGINE.memory.stats(),
+            "model": model_name,
+            "walk": walk["walk"],
+        }).encode()
+
+    def _review(self, data: dict) -> None:
+        """Human review queue: approve / add data / re-loop a held node.
+        add-data folds the pasted fact into the brain and re-runs the walk so
+        the held node clears and confidence rises; re-loop just re-walks."""
+        question = (data.get("question") or "").strip()
+        action = (data.get("action") or "").strip()
+        node_id = (data.get("id") or "").strip()
+        extra = (data.get("data") or "").strip()
+        if action == "approve":
+            ENGINE.memory.master_log({"event": "human_approve", "node": node_id})
+            self._send(200, json.dumps({"ok": True, "resolved": node_id}).encode(),
+                       "application/json")
+            return
+        if not question:
+            self._send(400, b'{"error":"need question to re-loop"}', "application/json")
+            return
+        model = get_model(data.get("model", "offline"))
+        if action == "add_data" and extra:
+            _ingest_text(f"review-{node_id or 'note'}", extra)   # compounds the brain
+            walk = ENGINE.run_walk(question, model=model, live_override=extra)
+        else:                                                    # re-loop
+            walk = ENGINE.run_walk(question, model=model,
+                                   live_override=extra or None)
+        self._send(200, self._walk_payload(walk["result"], walk, model.name),
+                   "application/json")
 
 
 def _maybe_ingest_on_boot() -> None:
