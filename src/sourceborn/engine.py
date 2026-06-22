@@ -346,3 +346,35 @@ class SourcebornEngine:
                     note="example bank +1")
 
         return RunResult(out, micro, matched, list(self.trace), gaps, proofs, halts)
+
+    # -- RGL: Recursive Genesis Loop ---------------------------------------
+    def run_recursive(self, raw_text: str, loops: int = 3,
+                      model: BaseModel | None = None, converge: float = 0.30) -> dict:
+        """The RGL (RGL.txt): the loop's shape is invariant, the content
+        compounds. Each pass's Point Zero carries the previous pass's product;
+        it re-opens up to ``loops`` times, stopping early when the product stops
+        changing (convergence). Only the final pass teaches the clone.
+        """
+        history: list[dict] = []
+        product = ""
+        last: RunResult | None = None
+        converged = False
+        n = max(1, loops)
+        for i in range(n):
+            text = raw_text if not product else (
+                f"{raw_text}\n\n[carry-forward from loop {i}] {product[:400]}")
+            last = self.run(text, learn=(i == n - 1), model=model)
+            history.append({
+                "loop": i + 1, "answer": last.output.answer,
+                "confidence": last.output.confidence,
+                "penetration": last.output.penetration_score,
+            })
+            if product:
+                drift = reality_reanchor(product, last.output.answer).drift_score
+                if drift < converge:
+                    converged = True
+                    product = last.output.answer
+                    break
+            product = last.output.answer
+        return {"result": last, "recursion": {
+            "loop_count": len(history), "converged": converged, "history": history}}

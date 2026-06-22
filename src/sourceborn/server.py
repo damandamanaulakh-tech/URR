@@ -92,6 +92,7 @@ border-radius:8px;padding:6px 10px;font-size:12px;background:var(--p2)}.stg.on{b
     <div class=row>
       <button id=go onclick=ask()>Run engine</button>
       <select id=model title="base model"></select>
+      <label title="RGL: compound over N loops">loops <input type=number id=loops value=1 min=1 max=6 style="width:46px;background:var(--p2);border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:4px"></label>
       <label><input type=checkbox id=pub> public-safe</label>
       <span class=muted id=status></span>
     </div>
@@ -155,7 +156,7 @@ async function ask(){
   document.getElementById('status').textContent='running SB + URR…';
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value})});
+      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value,loops:+document.getElementById('loops').value})});
     const d=await r.json(); render(d);
     HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
   }catch(e){document.getElementById('out').innerHTML='<div class=card>error: '+esc(''+e)+'</div>'}
@@ -170,6 +171,7 @@ function render(d){
   const tr=(d.trace||[]).map(t=>{const h=t.halt?(' <span class=hl>[HALT:'+esc(t.halt)+']</span>'):'';
     return esc((t.node_id||'').padEnd(7))+' '+esc((t.action||'').padEnd(20))+' '+esc(t.status)+h+'  '+esc(t.note||'')}).join('<br>');
   document.getElementById('out').innerHTML=
+    (d.recursion?('<div class=card><div class=k>RGL · '+d.recursion.loop_count+' loops'+(d.recursion.converged?' · converged':'')+'</div>'+(d.recursion.history||[]).map(h=>'<div class=lane>loop '+h.loop+' · '+esc(h.confidence)+'/'+esc(h.penetration)+' · '+esc((h.answer||'').slice(0,90))+'</div>').join('')+'</div>'):'')+
     '<div class=card><div class=k>Answer</div><div class=ans>'+esc(o.answer)+'</div>'+
       '<div class=row><span class=tag>'+esc(o.classification)+'</span><span class=tag>evidence: '+esc(o.evidence_tag)+
       '</span><span class=tag>confidence: '+esc(o.confidence)+'</span><span class=tag>penetration: '+esc(o.penetration_score)+
@@ -295,6 +297,19 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps({"config": asdict(cfg),
                                "memory": ENGINE.memory.brain(node_id).meta})
             self._send(200, body.encode(), "application/json")
+        elif path == "/graph":
+            from .nodes import SB_NODES, URR_NODES
+            sb = [n.sb_id for n in SB_NODES]
+            nodes = ([{"id": n.sb_id, "kind": "SB", "stage": n.stage, "name": n.name}
+                      for n in SB_NODES]
+                     + [{"id": n.urr_id, "kind": "URR", "name": n.name} for n in URR_NODES])
+            edges = [{"from": sb[i], "to": sb[i + 1]} for i in range(len(sb) - 1)]
+            gates = [c.node_id for c in ENGINE.brains.all()
+                     if c.kind == "SB" and c.urr_gate]
+            self._send(200, json.dumps({
+                "nodes": nodes, "edges": edges, "urr_gates": gates,
+                "note": "full interconnection — any node may feed-forward to any "
+                        "earlier node (Principle 8)"}).encode(), "application/json")
         else:
             self._send(404, b'{"error":"not found"}', "application/json")
 
@@ -337,7 +352,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, b'{"error":"empty question"}', "application/json")
                 return
             model = get_model(data.get("model", "offline"))
-            res = ENGINE.run(question, public_safe=bool(data.get("public")), model=model)
+            loops = max(1, min(int(data.get("loops", 1) or 1), 6))
+            recursion = None
+            if loops > 1:                       # RGL: compound over N loops
+                rec = ENGINE.run_recursive(question, loops=loops, model=model)
+                res, recursion = rec["result"], rec["recursion"]
+            else:
+                res = ENGINE.run(question, public_safe=bool(data.get("public")), model=model)
             payload = {
                 "output": asdict(res.output),
                 "micro_questions": res.micro_questions,
@@ -346,6 +367,7 @@ class Handler(BaseHTTPRequestHandler):
                 "halts": res.halts,
                 "memory": ENGINE.memory.stats(),
                 "model": model.name,
+                "recursion": recursion,
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
         except Exception as exc:

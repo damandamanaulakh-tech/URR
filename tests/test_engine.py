@@ -198,6 +198,15 @@ def test_synthetic_fuel_diagnose_and_inject():
     assert f["fuel"] == "Apostatic Inversion" and f["synthetic_tag"]["expiry"]
 
 
+def test_rgl_recursive_loop():
+    eng = _engine()
+    rec = eng.run_recursive("why does the small idea win?", loops=3)
+    assert rec["result"].output.answer
+    assert rec["recursion"]["loop_count"] >= 1
+    assert isinstance(rec["recursion"]["history"], list)
+    assert "converged" in rec["recursion"]
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
