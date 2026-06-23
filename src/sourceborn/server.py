@@ -600,6 +600,12 @@ class Handler(BaseHTTPRequestHandler):
                                "brains": len(ENGINE.brains.all()),
                                "weekly": scheduler.status(SB_ROOT)})
             self._send(200, body.encode(), "application/json")
+        elif path == "/diag":          # tiny connectivity self-test for one model
+            name = (qs.get("model") or ["openrouter"])[0]
+            m = get_model(name)
+            reply = m.complete("connectivity test", "Reply with the single word: ok")
+            self._send(200, json.dumps({"requested": name, "model": m.name,
+                                        "reply": reply[:400]}).encode(), "application/json")
         elif path == "/memory/report":
             self._send(200, json.dumps(_memory_report()).encode(), "application/json")
         elif path == "/snapshots":
