@@ -132,11 +132,23 @@ class GrokModel(_OpenAICompatible):
     _default_model = "grok-4"
 
 
+class OpenRouterModel(_OpenAICompatible):
+    """OpenRouter — one key, many models (OpenAI-compatible). Pick the routed
+    model with OPENROUTER_MODEL (e.g. ``anthropic/claude-3.5-sonnet``)."""
+
+    name = "openrouter"
+    _env_key = "OPENROUTER_API_KEY"
+    _url = "https://openrouter.ai/api/v1/chat/completions"
+    _model_env = "OPENROUTER_MODEL"
+    _default_model = "openai/gpt-4o"
+
+
 _REGISTRY = {
     "offline": RuleBasedModel,
     "claude": ClaudeModel,
     "grok": GrokModel,
     "openai": OpenAIModel,
+    "openrouter": OpenRouterModel,
 }
 
 
@@ -149,7 +161,7 @@ def get_model(name: str) -> BaseModel:
 def model_status() -> dict[str, bool]:
     """Which models are usable right now (keys present)? Drives the UI dropdown."""
     out = {"offline": True}
-    for key in ("claude", "grok", "openai"):
+    for key in ("claude", "grok", "openai", "openrouter"):
         try:
             out[key] = bool(getattr(_REGISTRY[key](), "available", False))
         except Exception:
@@ -161,7 +173,7 @@ def default_model() -> BaseModel:
     """Pick the default model. Honour SB_DEFAULT_MODEL first (e.g. "grok" when
     that's the key with credit), then fall back through the usual order."""
     pref = os.environ.get("SB_DEFAULT_MODEL", "").strip().lower()
-    order = ([pref] if pref in _REGISTRY else []) + ["claude", "grok", "openai"]
+    order = ([pref] if pref in _REGISTRY else []) + ["claude", "grok", "openai", "openrouter"]
     for key in order:
         m = _REGISTRY[key]()
         if getattr(m, "available", False):

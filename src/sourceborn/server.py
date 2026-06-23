@@ -333,7 +333,7 @@ let LASTQ='',LASTD=null,LASTANS='';
 
 fetch('/health').then(r=>r.json()).then(d=>{
   const sel=document.getElementById('model');
-  const labels={offline:'Offline (no key)',claude:'Claude (deep)',grok:'Grok (raw)',openai:'OpenAI'};
+  const labels={offline:'Offline (no key)',claude:'Claude (deep)',grok:'Grok (raw)',openai:'OpenAI',openrouter:'OpenRouter'};
   for(const [k,ok] of Object.entries(d.models)){
     const o=document.createElement('option');o.value=k;
     o.textContent=labels[k]+(ok?'':' — add key');if(!ok&&k!=='offline')o.disabled=true;
