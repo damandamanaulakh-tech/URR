@@ -465,26 +465,45 @@ class SourcebornEngine:
                     "why": "The claim isn't grounded in live fact yet (stays Low)",
                     "how": "Paste a link, figure or number below — or upload the source file",
                     "when": "Now — before it can be rated FACT",
+                    "options": ["Paste a source/number, then Add data & re-run",
+                                "Mark it a Belief (unproven) and continue",
+                                "Re-loop this node to search again"],
                     "for": target}
         if h == HaltType.SAFETY.value:
             return {"what": "The legitimate context / authorization",
                     "why": "This touches a hard safety line — it is mapped, never executed",
                     "how": "State who you are and the lawful purpose",
-                    "when": "Before anything proceeds", "for": target}
+                    "when": "Before anything proceeds",
+                    "options": ["State who you are + lawful purpose",
+                                "Keep it mapped only (don't execute)",
+                                "Drop this line and re-loop"],
+                    "for": target}
         if h == HaltType.LOGIC.value:
             return {"what": "Proof for the absolute claim, or softer wording",
                     "why": "An over-claim (always / never / guaranteed) was detected",
                     "how": "Give a counter-example test, or qualify the statement",
-                    "when": "Now", "for": target}
+                    "when": "Now",
+                    "options": ["Soften the absolute (drop always/never)",
+                                "Give a counter-example test",
+                                "Approve as a Claim, not a Fact"],
+                    "for": target}
         if node_id == "SB-40":
             return {"what": "Your approval to merge the connected sources",
                     "why": "Two or more sources recur — a merge needs a human gate",
                     "how": "Approve to combine them, or re-loop to keep them separate",
-                    "when": "Now", "for": target}
+                    "when": "Now",
+                    "options": ["Approve the merge",
+                                "Keep sources separate (re-loop)",
+                                "Add a third source first"],
+                    "for": target}
         return {"what": "Your read on whether this holds",
                 "why": "Doubt bit or the node didn't sit right",
                 "how": "Add a note/data, re-loop, or approve as-is",
-                "when": "Now", "for": target}
+                "when": "Now",
+                "options": ["Approve as-is",
+                            "Add a note/data, then re-run",
+                            "Re-loop this node"],
+                "for": target}
 
     def run_walk(self, raw_text: str, model: BaseModel | None = None,
                  live_override: str | None = None) -> dict:
