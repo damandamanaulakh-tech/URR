@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from typing import Protocol
 
@@ -34,8 +35,16 @@ class BaseModel(Protocol):
 def _post_json(url: str, headers: dict, payload: dict, timeout: int = 90) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "ignore"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as exc:        # surface the provider's real message
+        body = exc.read().decode("utf-8", "ignore")
+        try:
+            j = json.loads(body)
+        except Exception:
+            j = {"error": {"message": (body[:300] or str(exc))}}
+        return j if isinstance(j, dict) and "error" in j else {"error": j}
 
 
 class RuleBasedModel:
@@ -74,6 +83,9 @@ class ClaudeModel:
                 {"model": self.model, "max_tokens": 4000, "system": system,
                  "messages": [{"role": "user", "content": prompt}]},
             )
+            if data.get("error"):
+                err = data["error"]
+                return f"[claude error: {err.get('message') if isinstance(err, dict) else err}]"
             text = "".join(b.get("text", "") for b in data.get("content", [])
                            if b.get("type") == "text")
             return text or "[claude returned no text]"
@@ -89,6 +101,7 @@ class _OpenAICompatible:
     _url = "https://api.openai.com/v1/chat/completions"
     _model_env = "OPENAI_MODEL"
     _default_model = "gpt-4o"
+    _extra_headers: dict = {}
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or os.environ.get(self._model_env, self._default_model)
@@ -104,12 +117,17 @@ class _OpenAICompatible:
         try:
             data = _post_json(
                 self._url,
-                {"Authorization": f"Bearer {self.key}", "content-type": "application/json"},
+                {"Authorization": f"Bearer {self.key}", "content-type": "application/json",
+                 **self._extra_headers},
                 {"model": self.model, "max_tokens": 4000,
                  "messages": [{"role": "system", "content": system},
                               {"role": "user", "content": prompt}]},
             )
-            return data["choices"][0]["message"].get("content") or f"[{self.name} returned no text]"
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                return f"[{self.name} error: {err.get('message') if isinstance(err, dict) else err}]"
+            return (data.get("choices", [{}])[0].get("message", {}).get("content")
+                    or f"[{self.name} returned no text]")
         except Exception as exc:
             return f"[{self.name} error: {exc}] " + RuleBasedModel().complete(system, prompt)
 
@@ -141,6 +159,8 @@ class OpenRouterModel(_OpenAICompatible):
     _url = "https://openrouter.ai/api/v1/chat/completions"
     _model_env = "OPENROUTER_MODEL"
     _default_model = "openai/gpt-4o"
+    _extra_headers = {"HTTP-Referer": "https://sourceborn.onrender.com",
+                      "X-Title": "Sourceborn"}
 
 
 _REGISTRY = {
