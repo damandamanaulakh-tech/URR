@@ -550,6 +550,29 @@ class SourcebornEngine:
                 holds.append({"sb_id": step.sb_id, "name": step.sb_name,
                               "urr_id": urr_id, "why": why, "halt": step.halt,
                               "ask": self._walk_ask(t.node_id, step.halt, step.sb_name)})
+        # FULL PYRAMID — every remaining SB node runs its URR pass on the final
+        # answer and downloads the intake into its own brain, so ALL nodes fire
+        # and the pyramid learns each run. Rule-based => no extra model/web cost
+        # (live sentinel avoids re-grounding; evidence was already gated at URR-08).
+        answer = res.output.answer if res.output else raw_text
+        for nid, cfg in self.brains.configs.items():
+            if not nid.startswith("SB-") or nid in seen:
+                continue
+            seen.add(nid)
+            urr_n += 1
+            urr_id = f"URR-{urr_n:02d}"
+            packet = self.urr_micropass(urr_id, nid, answer, live="grounded@URR-08")
+            verdict = "hold" if packet.halt_triggered else "pass"
+            why = f"{cfg.name}: checked the answer from its station — {verdict}"
+            self.memory.write(nid, MemoryEntry(
+                node_id=nid, raw_source_id="",
+                content=f"URR intake [{verdict}]: {why}",
+                parameters={"urr_id": urr_id, "verdict": verdict},
+                tags=["urr_intake"]), name="URR Intake Download")
+            steps.append(NodeStep(
+                sb_id=nid, sb_name=cfg.name, action="pyramid_verify",
+                urr_id=urr_id, verdict=verdict, halt=packet.halt_type, why=why,
+                memory_written=True, can_loop_back=(verdict == "hold")))
         self.memory.master_log({"event": "walk_complete",
                                 "nodes": len(steps), "holds": len(holds)})
         return {"result": res, "walk": {
