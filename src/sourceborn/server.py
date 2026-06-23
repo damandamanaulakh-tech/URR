@@ -426,6 +426,7 @@ function reviewQueue(d){const h=(d.walk&&d.walk.holds)||[]; if(!h.length)return 
     return '<div class=hold><div><b>'+esc(x.sb_id)+'</b> '+esc(x.name)+' <span class="badge warn">hold</span></div>'+
     '<div class=fivew><div><b>What</b>'+esc(a.what||x.why||'—')+'</div><div><b>Why</b>'+esc(a.why||'—')+'</div>'+
     '<div><b>How</b>'+esc(a.how||'—')+'</div><div><b>When</b>'+esc(a.when||'now')+'</div></div>'+
+    ((a.options&&a.options.length)?'<div class=fivew style="margin-top:6px"><div style="grid-column:1/-1"><b>Options</b> '+a.options.map(o=>'<span class=tag>'+esc(o)+'</span>').join(' ')+'</div></div>':'')+
     '<textarea class=in id="hd_'+esc(x.sb_id)+'" placeholder="paste the data / source asked for, then Add data & re-run" style="min-height:46px"></textarea>'+
     '<div class=hactions><button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'add_data\')">Add data &amp; re-run</button>'+
     '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'reloop\')">Re-loop</button>'+
