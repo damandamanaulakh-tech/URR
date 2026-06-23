@@ -193,7 +193,7 @@ def default_model() -> BaseModel:
     """Pick the default model. Honour SB_DEFAULT_MODEL first (e.g. "grok" when
     that's the key with credit), then fall back through the usual order."""
     pref = os.environ.get("SB_DEFAULT_MODEL", "").strip().lower()
-    order = ([pref] if pref in _REGISTRY else []) + ["claude", "grok", "openai", "openrouter"]
+    order = ([pref] if pref in _REGISTRY else []) + ["grok", "openrouter", "openai", "claude"]
     for key in order:
         m = _REGISTRY[key]()
         if getattr(m, "available", False):

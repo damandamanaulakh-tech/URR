@@ -257,7 +257,7 @@ def test_default_model_prefers_env_pref():
         os.environ["SB_DEFAULT_MODEL"] = "grok"
         assert llm.default_model().name == "grok"      # env pref wins
         del os.environ["SB_DEFAULT_MODEL"]
-        assert llm.default_model().name == "claude"    # else first in order
+        assert llm.default_model().name == "grok"      # else first working in order (claude no longer default)
     finally:
         for k, v in old.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)

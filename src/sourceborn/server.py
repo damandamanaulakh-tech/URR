@@ -301,7 +301,7 @@ details[open]>summary:before{content:"\25be  "}
         <span class=status id=status></span>
       </div>
       <div class=toolbar style="border:0;padding-top:8px">
-        <span class=field><input type=file id=file accept=".txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf,.log,.py,.js"></span>
+        <span class=field><input type=file id=file multiple accept=".txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf,.log,.py,.js"></span>
         <button class=btn onclick=doUpload()>Review file</button>
         <span class=status id=ustat></span>
       </div>
@@ -317,12 +317,11 @@ details[open]>summary:before{content:"\25be  "}
 </main>
 </div>
 
+<style>#model option,select option{color:#0b1020;background:#fff}#model option:disabled,select option:disabled{color:#9aa3b2}</style>
 <script>
 const STAGES=[["1","Foundation & Intake"],["2","Human Core"],["3","Truth & Doubt"],["4","Evidence"],
 ["5","Connection & Memory"],["6","Synthetic & Invention"],["7","Risk & Control"],["8","Output & Update"]];
-const EXAMPLES=["Why does the small idea win? Prove it with current data.",
-"Should I scale my small business or do an MBA?","I want to prove myself and I fear failing",
-"Connect my last three ideas into one move"];
+const EXAMPLES=[];
 function stageOf(id){let n=parseInt((id||'').replace('SB-',''));if(!n)return 0;
   return n<=8?1:n<=18?2:n<=28?3:n<=36?4:n<=44?5:n<=52?6:n<=60?7:8}
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -389,21 +388,29 @@ function dictate(){
   rec.onresult=e=>{const t=e.results[0][0].transcript;const q=document.getElementById('q');q.value=(q.value?q.value+' ':'')+t;};
   rec.onend=()=>{b.classList.remove('on');b.innerHTML='&#127908;';};rec.onerror=rec.onend;rec.start();
 }
+function speak(){const s=window.speechSynthesis;if(!s){document.getElementById('status').textContent='speech not supported in this browser';return;}
+  if(s.speaking){s.cancel();return;} const u=new SpeechSynthesisUtterance(LASTANS||'');u.lang='en-US';u.rate=1;s.speak(u);}
 function doUpload(){
-  const inp=document.getElementById('file');const f=inp.files&&inp.files[0];
-  const st=document.getElementById('ustat'); if(!f){st.textContent='choose a file first';return;}
-  const textlike=/\.(txt|md|markdown|csv|tsv|json|log|py|js|html|xml|ya?ml)$/i.test(f.name);
-  const fr=new FileReader();st.textContent='reading…';
-  fr.onload=async()=>{
-    const body={filename:f.name,model:document.getElementById('model').value};
-    if(textlike)body.text=fr.result; else body.b64=(''+fr.result).split(',')[1]||'';
-    st.textContent='reviewing…';busy(true);LASTQ='file: '+f.name;
-    try{const r=await fetch('/upload',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-      const d=await r.json(); if(d.error){st.textContent='error: '+esc(d.error);}else{render(d);
-        st.textContent=d.upload?('read '+d.upload.chars+' chars'+(d.upload.note?' · '+d.upload.note:'')):'done';}
-    }catch(e){st.textContent='error'} busy(false);
+  const inp=document.getElementById('file');const files=inp.files?[].slice.call(inp.files):[];
+  const st=document.getElementById('ustat'); if(!files.length){st.textContent='choose a file first';return;}
+  const total=files.length;let i=0;
+  const next=()=>{
+    if(i>=total){busy(false);if(total>1)st.textContent='reviewed '+total+' files';return;}
+    const f=files[i],n=i+1;
+    const textlike=/\.(txt|md|markdown|csv|tsv|json|log|py|js|html|xml|ya?ml)$/i.test(f.name);
+    const fr=new FileReader();st.textContent='reading '+n+'/'+total+' · '+f.name+'…';
+    fr.onload=async()=>{
+      const body={filename:f.name,model:document.getElementById('model').value};
+      if(textlike)body.text=fr.result; else body.b64=(''+fr.result).split(',')[1]||'';
+      st.textContent='reviewing '+n+'/'+total+'…';busy(true);LASTQ='file: '+f.name;
+      try{const r=await fetch('/upload',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+        const d=await r.json(); if(d.error){st.textContent='error: '+esc(d.error);}else{render(d);
+          if(total===1)st.textContent=d.upload?('read '+d.upload.chars+' chars'+(d.upload.note?' · '+d.upload.note:'')):'done';}
+      }catch(e){st.textContent='error'} i++; next();
+    };
+    if(textlike)fr.readAsText(f); else fr.readAsDataURL(f);
   };
-  if(textlike)fr.readAsText(f); else fr.readAsDataURL(f);
+  next();
 }
 function tally(arr){const m={};(arr||[]).forEach(x=>m[x]=(m[x]||0)+1);
   return Object.entries(m).map(([k,v])=>esc(k)+(v>1?' ×'+v:'')).join(', ')||'—';}
@@ -452,7 +459,7 @@ function render(d){
       (o.public_safe?'<span class=badge>public-safe</span>':'')+'</div>'+
       (confWhy(d)?'<div class=why>'+confWhy(d)+'</div>':'')+
       '<div class=fals>falsifier · '+esc(o.falsifier)+'</div>'+
-      '<div class=hactions><button class="btn sm" onclick="downloadReport(\'md\')">⬇ Markdown</button><button class="btn sm" onclick="downloadReport(\'csv\')">⬇ CSV</button></div></div>'+
+      '<div class=hactions><button class="btn sm" onclick="speak()">🔊 Read aloud</button><button class="btn sm" onclick="downloadReport(\'md\')">⬇ Markdown</button><button class="btn sm" onclick="downloadReport(\'csv\')">⬇ CSV</button></div></div>'+
     walkCard(d)+reviewQueue(d)+
     '<div class=card><div class=k>Eternal example & wisdom match</div>'+m+'</div>'+
     '<div class=card><div class=k>Core Gate · human layer (SB-10)</div>'+
