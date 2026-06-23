@@ -58,6 +58,11 @@ class RuleBasedModel:
         return ("[offline draft] " + head[:240]
                 + " — add an API key in Render's Environment tab to switch on real reasoning")
 
+    def complete_vision(self, system: str, prompt: str, image_b64: str,
+                        mime: str = "image/png") -> str:
+        return ("[offline] image received — add an API key (Grok/OpenRouter/Claude) "
+                "in Render's Environment tab to switch on real vision")
+
 
 class ClaudeModel:
     """Anthropic Messages API over HTTPS (no SDK). Model: claude-opus-4-8."""
@@ -91,6 +96,29 @@ class ClaudeModel:
             return text or "[claude returned no text]"
         except Exception as exc:
             return f"[claude error: {exc}] " + RuleBasedModel().complete(system, prompt)
+
+    def complete_vision(self, system: str, prompt: str, image_b64: str,
+                        mime: str = "image/png") -> str:
+        if not self.key:
+            return RuleBasedModel().complete_vision(system, prompt, image_b64, mime)
+        try:
+            data = _post_json(
+                "https://api.anthropic.com/v1/messages",
+                {"x-api-key": self.key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+                {"model": self.model, "max_tokens": 4000, "system": system,
+                 "messages": [{"role": "user", "content": [
+                     {"type": "image", "source": {"type": "base64",
+                      "media_type": mime, "data": image_b64}},
+                     {"type": "text", "text": prompt}]}]},
+            )
+            if data.get("error"):
+                err = data["error"]
+                return f"[claude vision error: {err.get('message') if isinstance(err, dict) else err}]"
+            return "".join(b.get("text", "") for b in data.get("content", [])
+                           if b.get("type") == "text") or "[claude returned no text]"
+        except Exception as exc:
+            return f"[claude vision error: {exc}]"
 
 
 class _OpenAICompatible:
@@ -130,6 +158,30 @@ class _OpenAICompatible:
                     or f"[{self.name} returned no text]")
         except Exception as exc:
             return f"[{self.name} error: {exc}] " + RuleBasedModel().complete(system, prompt)
+
+    def complete_vision(self, system: str, prompt: str, image_b64: str,
+                        mime: str = "image/png") -> str:
+        if not self.key:
+            return RuleBasedModel().complete_vision(system, prompt, image_b64, mime)
+        try:
+            data = _post_json(
+                self._url,
+                {"Authorization": f"Bearer {self.key}", "content-type": "application/json",
+                 **self._extra_headers},
+                {"model": os.environ.get("SB_VISION_MODEL", self.model), "max_tokens": 4000,
+                 "messages": [{"role": "system", "content": system},
+                              {"role": "user", "content": [
+                                  {"type": "text", "text": prompt},
+                                  {"type": "image_url", "image_url": {
+                                      "url": f"data:{mime};base64,{image_b64}"}}]}]},
+            )
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                return f"[{self.name} vision error: {err.get('message') if isinstance(err, dict) else err}]"
+            return (data.get("choices", [{}])[0].get("message", {}).get("content")
+                    or f"[{self.name} returned no text]")
+        except Exception as exc:
+            return f"[{self.name} vision error: {exc}]"
 
 
 class OpenAIModel(_OpenAICompatible):
@@ -199,3 +251,32 @@ def default_model() -> BaseModel:
         if getattr(m, "available", False):
             return m
     return RuleBasedModel()
+
+
+def generate_image(prompt: str) -> dict:
+    """Text -> image via the first available provider key (one key, no new dep).
+    Prefers xAI (grok-2-image), then OpenAI. Returns {"url"|"b64"} or {"error"}.
+    Override the model with SB_IMAGE_MODEL."""
+    xai = os.environ.get("XAI_API_KEY")
+    oai = os.environ.get("OPENAI_API_KEY")
+    if xai:
+        url = "https://api.x.ai/v1/images/generations"
+        headers = {"Authorization": f"Bearer {xai}", "content-type": "application/json"}
+        payload = {"model": os.environ.get("SB_IMAGE_MODEL", "grok-2-image"),
+                   "prompt": prompt, "n": 1}
+    elif oai:
+        url = "https://api.openai.com/v1/images/generations"
+        headers = {"Authorization": f"Bearer {oai}", "content-type": "application/json"}
+        payload = {"model": os.environ.get("SB_IMAGE_MODEL", "gpt-image-1"),
+                   "prompt": prompt, "n": 1}
+    else:
+        return {"error": "no image key — set XAI_API_KEY or OPENAI_API_KEY in Render"}
+    try:
+        d = _post_json(url, headers, payload)
+    except Exception as exc:
+        return {"error": str(exc)}
+    if isinstance(d, dict) and d.get("error"):
+        err = d["error"]
+        return {"error": err.get("message") if isinstance(err, dict) else str(err)}
+    item = (d.get("data") or [{}])[0]
+    return {"url": item.get("url"), "b64": item.get("b64_json"), "prompt": prompt}
