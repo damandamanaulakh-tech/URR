@@ -1,15 +1,23 @@
 """Sourceborn web service — a zero-dependency HTTP server (stdlib only).
 
-Runs the engine behind a dark chat dashboard and a JSON API, so it can be
-deployed to Render (or any host) with nothing to install but Python.
+Runs the engine behind a dark dashboard and a JSON API, so it can be deployed
+to Render (or any host) with nothing to install but Python.
 
     python -m sourceborn.server          # local: http://localhost:8000
     PORT=10000 python -m sourceborn.server
 
 Endpoints:
     GET  /            -> the dashboard UI
-    POST /ask         -> {"question","public","model"} -> engine result JSON
-    GET  /health      -> {"ok",true,"model",..,"models",{claude:bool,...}}
+    GET  /health      -> model + brain status
+    GET  /brains /brain /graph
+    GET  /memory/report          -> what is stored in each memory node (live)
+    GET  /snapshots /snapshot    -> saved memory snapshots (current vs older)
+    POST /ask         -> per-node SB<->URR walk + human review queue
+    POST /review      -> approve / add-data / re-loop a held node
+    POST /ingest      -> feed text into the brain
+    POST /upload      -> review an uploaded file (txt/md/csv/docx/xlsx/pdf)
+    POST /snapshot    -> save a memory snapshot
+    POST /brains/update /brain/settings
 
 Set ANTHROPIC_API_KEY / XAI_API_KEY / OPENAI_API_KEY (env vars on Render) to turn
 on real reasoning. Render's disk is ephemeral; for persistent memory mount a
@@ -18,6 +26,7 @@ Render Disk at ``.sourceborn`` or use a DB (docs/RECOMMENDATION.md, Phase 3).
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -27,10 +36,13 @@ from urllib.parse import urlparse, parse_qs
 
 from . import scheduler
 from .engine import SourcebornEngine
+from .extract import extract_text
 from .llm import get_model, model_status
+from .models import _now
 
 SB_ROOT = os.environ.get("SB_ROOT", ".sourceborn")
 ENGINE = SourcebornEngine(root=SB_ROOT)
+SNAP_DIR = os.path.join(SB_ROOT, "_snapshots")
 
 
 def _ingest_text(name: str, text: str) -> dict:
@@ -53,6 +65,58 @@ def _ingest_text(name: str, text: str) -> dict:
             f.write(text)
     return {"memory": ENGINE.memory.stats(), "examples": len(ENGINE.persona.examples)}
 
+
+def _memory_report(limit: int = 3) -> dict:
+    """A snapshot of what each memory node holds — counts, last update, and the
+    most recent entries (so the user can see exactly what was added, and compare
+    to older snapshots)."""
+    mem = ENGINE.memory
+    bdir = os.path.join(mem.root, "brains")
+    nodes = []
+    if os.path.isdir(bdir):
+        for nid in sorted(os.listdir(bdir)):
+            b = mem.brain(nid)
+            if b.meta.get("entry_count", 0) == 0:
+                continue
+            cfg = ENGINE.brains.get(nid)
+            entries = b.read_all()
+            recent = [{"content": (e.content or "")[:180], "tags": e.tags,
+                       "evidence_tag": e.evidence_tag, "classification": e.classification}
+                      for e in entries[-limit:]]
+            nodes.append({"id": nid, "name": (cfg.name if cfg else b.meta.get("name", "")),
+                          "entry_count": b.meta.get("entry_count", len(entries)),
+                          "last_update": b.meta.get("last_update", ""),
+                          "recent": recent})
+    return {"at": _now(), "totals": mem.stats(), "nodes": nodes}
+
+
+def _save_snapshot(name: str = "") -> dict:
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    rep = _memory_report()
+    sid = re.sub(r"[^0-9A-Za-z]", "", rep["at"])[:14] or str(len(os.listdir(SNAP_DIR)))
+    rep["name"] = name.strip() or f"snapshot {sid}"
+    rep["id"] = sid
+    with open(os.path.join(SNAP_DIR, sid + ".json"), "w", encoding="utf-8") as f:
+        json.dump(rep, f, ensure_ascii=False)
+    return {"ok": True, "id": sid, "name": rep["name"], "total": rep["totals"]}
+
+
+def _list_snapshots() -> list[dict]:
+    if not os.path.isdir(SNAP_DIR):
+        return []
+    out = []
+    for fn in sorted(os.listdir(SNAP_DIR), reverse=True):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(SNAP_DIR, fn), encoding="utf-8") as f:
+                    d = json.load(f)
+                out.append({"id": d.get("id", fn[:-5]), "name": d.get("name", fn),
+                            "at": d.get("at", ""), "total": d.get("totals", {})})
+            except Exception:
+                continue
+    return out
+
+
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Sourceborn</title><style>
@@ -70,14 +134,15 @@ body{margin:0;color:var(--ink);font:15px/1.55 'Inter',-apple-system,BlinkMacSyst
 ::selection{background:rgba(124,139,255,.3)}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--line2);border-radius:10px;border:2px solid transparent;background-clip:padding-box}
-.app{max-width:1180px;margin:0 auto;padding:0 18px 60px}
+.app{max-width:1240px;margin:0 auto;padding:0 18px 60px}
 .topbar{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;gap:12px;
  padding:14px 4px;margin-bottom:8px;flex-wrap:wrap;
  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
  background:linear-gradient(180deg,rgba(7,8,9,.86),rgba(7,8,9,.35));border-bottom:1px solid var(--line)}
 .brand{display:flex;gap:12px;align-items:center}
-.logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:grid;place-items:center;
+.logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:grid;place-items:center;overflow:hidden;
  box-shadow:0 6px 18px -6px rgba(124,139,255,.6)}
+.logo img{width:38px;height:38px;object-fit:cover;display:block}
 .brand .name{font-size:18px;font-weight:700;letter-spacing:-.01em}
 .brand .tag{font-size:12px;color:var(--mut)}
 .stats{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -86,13 +151,17 @@ body{margin:0;color:var(--ink);font:15px/1.55 'Inter',-apple-system,BlinkMacSyst
 .pill b{color:var(--ink);font-weight:600}
 .pdot{width:8px;height:8px;border-radius:50%;background:var(--mut2)}
 .pdot.live{background:var(--ok);box-shadow:0 0 0 3px rgba(52,211,153,.18)}
-.grid{display:grid;grid-template-columns:1fr 320px;gap:18px;align-items:start}
+.grid{display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start}
 @media(max-width:880px){.grid{grid-template-columns:1fr}}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
  border-radius:16px;padding:18px;margin:0 0 16px;box-shadow:var(--shadow);transition:border-color .15s}
-.card:hover{border-color:var(--line2)}aside .card{padding:15px}
+.card:hover{border-color:var(--line2)}.side .card{padding:14px}
 .k{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);
  margin:0 0 11px;display:flex;align-items:center;gap:8px}.k .num{margin-left:auto;color:var(--mut2)}
+.side .acc{margin:0 0 10px}
+.side .acc>summary{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--ink);
+ padding:9px 0;border-bottom:1px solid var(--line)}
+.side .sec{padding:11px 2px 4px}
 .hero{padding:6px;background:linear-gradient(180deg,var(--elev),var(--panel2));border-color:var(--line2)}
 .hero .inner{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:14px}
 textarea,input,select{font:inherit;color:var(--ink)}
@@ -102,7 +171,7 @@ textarea,input,select{font:inherit;color:var(--ink)}
 .field{display:inline-flex;gap:7px;align-items:center;background:var(--panel);border:1px solid var(--line);
  border-radius:10px;padding:0 10px;height:38px;color:var(--mut);font-size:13px}
 .field select,.field input{background:transparent;border:0;outline:none;color:var(--ink);font-size:13px}
-.field input[type=number]{width:40px}.field:focus-within{border-color:var(--acc);box-shadow:var(--ring)}
+.field:focus-within{border-color:var(--acc);box-shadow:var(--ring)}
 button.primary{height:38px;padding:0 18px;border:0;border-radius:10px;background:var(--grad);color:#0a0f1f;
  font-weight:700;font-size:14px;cursor:pointer;display:inline-flex;gap:8px;align-items:center;
  box-shadow:0 8px 20px -8px rgba(124,139,255,.7);transition:.15s}
@@ -110,10 +179,12 @@ button.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
 button.primary:disabled{opacity:.6;cursor:default;transform:none}
 .btn{height:34px;padding:0 13px;border:1px solid var(--line2);border-radius:9px;background:var(--panel);
  color:var(--ink);font-weight:600;font-size:13px;cursor:pointer;transition:.15s}
-.btn:hover{border-color:var(--acc);color:#fff}
+.btn:hover{border-color:var(--acc);color:#fff}.btn.sm{height:30px;padding:0 10px;font-size:12px}
+.iconbtn{width:38px;height:38px;border:1px solid var(--line);border-radius:10px;background:var(--panel);
+ color:var(--ink);cursor:pointer;font-size:15px}.iconbtn:hover{border-color:var(--acc)}.iconbtn.on{color:var(--bad);border-color:var(--bad)}
 .switch{display:inline-flex;gap:9px;align-items:center;cursor:pointer;color:var(--mut);font-size:13px;user-select:none}
 .switch input{display:none}
-.switch .track{width:38px;height:22px;border-radius:999px;background:var(--line2);position:relative;transition:.18s}
+.switch .track{width:38px;height:22px;border-radius:999px;background:var(--line2);position:relative;transition:.18s;flex:none}
 .switch .track:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#cfd6e6;transition:.18s}
 .switch input:checked+.track{background:var(--acc)}
 .switch input:checked+.track:after{transform:translateX(16px);background:#fff}
@@ -142,6 +213,8 @@ button.primary:disabled{opacity:.6;cursor:default;transform:none}
 .vd{font-size:11px}.vd.pass{color:var(--ok)}.vd.hold{color:var(--warn)}
 .memok{font-size:11px;color:var(--gd);margin-left:6px}
 .hold{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:12px;margin:9px 0}
+.fivew{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin:8px 0;font-size:12.5px;color:var(--mut)}
+.fivew b{color:var(--acc);font-weight:600;margin-right:5px}
 .hactions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .tag{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:2px 10px;margin:3px 4px 0 0;font-size:12px;color:var(--mut)}
 .hl{color:var(--hl)}.gd{color:var(--gd)}.muted{color:var(--mut)}
@@ -160,6 +233,9 @@ button.primary:disabled{opacity:.6;cursor:default;transform:none}
 .hist a:hover{color:var(--ink);padding-left:4px}
 .in{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:9px 11px;outline:none;font:inherit;color:var(--ink)}
 .in:focus{border-color:var(--acc);box-shadow:var(--ring)}.in::placeholder{color:var(--mut2)}
+.rep{font-size:12.5px}.repn{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin:7px 0;background:var(--panel)}
+.repn .h{display:flex;justify-content:space-between;color:var(--ink);font-weight:600}
+.repn .e{color:var(--mut);margin-top:4px;border-top:1px dashed var(--line);padding-top:4px}
 details summary{cursor:pointer;color:var(--mut);font-size:13px;padding:4px 0;list-style:none}
 details summary::-webkit-details-marker{display:none}
 details summary:before{content:"\25b8  ";color:var(--mut2)}
@@ -172,7 +248,7 @@ details[open]>summary:before{content:"\25be  "}
 
 <header class=topbar>
   <div class=brand>
-    <div class=logo><svg width=22 height=22 viewBox="0 0 24 24"><path d="M12 2 22 21 2 21Z" fill="#0a0f1f" opacity=".9"/><path d="M7.5 12.5h9M9.5 17h5" stroke="#fff" stroke-width="1.4" opacity=".55" stroke-linecap=round/></svg></div>
+    <div class=logo><img src="https://avatars.githubusercontent.com/u/284725680?v=4" alt="" onerror="this.remove()"></div>
     <div><div class=name>Sourceborn</div><div class=tag>eternal example &middot; present fact &middot; more parameters, more outcome</div></div>
   </div>
   <div class=stats>
@@ -183,41 +259,62 @@ details[open]>summary:before{content:"\25be  "}
 </header>
 
 <div class=grid>
+<!-- LEFT: read-only — history + library (memories, pyramid, reports, node brains) -->
+<nav class=side>
+  <div class=card><div class=k>History</div><div class=hist id=hist><span class=muted>empty</span></div></div>
+  <div class=card>
+    <details class=acc open><summary>Library</summary>
+      <div class=sec>
+        <div class=k>Three memories</div>
+        <div class=mem>
+          <div class=memrow><span class="md r"></span><div><b>Reflex</b> &middot; your corpus &amp; clone</div></div>
+          <div class=memrow><span class="md i"></span><div><b>Instinct</b> &middot; wisdom bank</div></div>
+          <div class=memrow><span class="md e"></span><div><b>Eyes</b> &middot; live fact</div></div>
+        </div>
+      </div>
+      <details class=acc><summary>Engine pyramid</summary><div class=sec><div class=pyr id=pyr></div></div></details>
+      <details class=acc><summary>Reports &amp; snapshots</summary><div class=sec>
+        <div class=hactions><button class="btn sm" onclick=loadReport()>Memory report</button>
+          <button class="btn sm" onclick=saveSnapshot()>Save snapshot</button></div>
+        <div class=status id=repstat style="margin-top:6px"></div>
+        <div id=snaps style="margin-top:6px"></div>
+      </div></details>
+      <details class=acc><summary>Node brains (<span id=bcount>0</span>)</summary><div class=sec>
+        <div class=hactions><button class="btn sm" onclick=weeklyUpdate()>Weekly update</button><span class=status id=bstat></span></div>
+        <div id=brains style="margin-top:6px"></div>
+      </div></details>
+    </details>
+  </div>
+</nav>
+
+<!-- RIGHT: editable — ask, answer, review queue, feed the brain -->
 <main>
   <section class="card hero">
     <div class=inner>
       <textarea id=q placeholder="Ask anything — a question, a mess, a half-thought…   ⌘/Ctrl + Enter to run"></textarea>
       <div class=toolbar>
         <button id=go class=primary onclick=ask()><span id=goico>&#9654;</span><span id=golbl>Run engine</span></button>
+        <button class=iconbtn id=mic title="voice to text" onclick=dictate()>&#127908;</button>
         <span class=field><select id=model title="base model"></select></span>
+        <label class=switch title="keep the thread — fold the last answer into the next ask"><input type=checkbox id=cont checked><span class=track></span> continue thread</label>
         <label class=switch><input type=checkbox id=pub><span class=track></span> public-safe</label>
         <span class=status id=status></span>
+      </div>
+      <div class=toolbar style="border:0;padding-top:8px">
+        <span class=field><input type=file id=file accept=".txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf,.log,.py,.js"></span>
+        <button class=btn onclick=doUpload()>Review file</button>
+        <span class=status id=ustat></span>
       </div>
     </div>
     <div class=chips id=examples></div>
   </section>
   <div id=out></div>
-</main>
-
-<aside>
-  <div class=card><div class=k>Three memories</div>
-    <div class=mem>
-      <div class=memrow><span class="md r"></span><div><b>Reflex</b> &middot; your corpus &amp; clone</div></div>
-      <div class=memrow><span class="md i"></span><div><b>Instinct</b> &middot; wisdom bank</div></div>
-      <div class=memrow><span class="md e"></span><div><b>Eyes</b> &middot; live fact</div></div>
-    </div></div>
-  <div class=card><div class=k>Engine pyramid <span class=num>stages fired</span></div><div class=pyr id=pyr></div></div>
-  <div class=card><div class=k>History</div><div class=hist id=hist><span class=muted>empty</span></div></div>
   <div class=card><div class=k>Feed the brain</div>
     <input id=fname class=in placeholder="name (optional)" style="margin-bottom:7px">
     <textarea id=ftext class=in placeholder="paste a note, thought, or core…" style="min-height:60px;resize:vertical"></textarea>
     <div class=toolbar style="border:0;padding:0;margin-top:9px"><button class=btn onclick=feed()>Add to memory</button><span class=status id=fstat></span></div>
   </div>
-  <div class=card><div class=k>Node brains <span class=num id=bcount>0</span></div>
-    <div class=toolbar style="border:0;padding:0;margin-bottom:4px"><button class=btn onclick=weeklyUpdate()>Weekly update</button><span class=status id=bstat></span></div>
-    <div id=brains style="margin-top:6px"></div>
-  </div>
-</aside>
+</main>
 </div>
 
 <script>
@@ -232,6 +329,7 @@ function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':
 function confClass(c){c=(''+c).toLowerCase();return c=='high'?'ok':c=='medium'?'warn':c=='low'?'bad':''}
 function confPct(c){c=(''+c).toLowerCase();return c=='high'?92:c=='medium'?62:c=='low'?32:50}
 let HIST=JSON.parse(localStorage.getItem('sb_hist')||'[]');
+let LASTQ='',LASTD=null,LASTANS='';
 
 fetch('/health').then(r=>r.json()).then(d=>{
   const sel=document.getElementById('model');
@@ -254,7 +352,7 @@ document.querySelectorAll('#examples .chip').forEach((c,i)=>c.onclick=()=>{
 function drawPyr(firedStages,counts){
   firedStages=firedStages||new Set(); counts=counts||{};
   let html='';
-  for(let i=STAGES.length-1;i>=0;i--){            // apex (stage 8) on top -> base
+  for(let i=STAGES.length-1;i>=0;i--){
     const s=STAGES[i], n=+s[0], on=firedStages.has(n), w=44+(8-n)*7;
     const c=counts[n]?(' · '+counts[n]+' fired'):'';
     html+='<div class="plvl'+(on?' on':'')+'" style="width:'+w+'%">SB'+n+' '+esc(s[1])+c+'</div>';
@@ -272,16 +370,40 @@ function busy(on){
   ic.className=on?'spin':''; ic.innerHTML=on?'':'&#9654;';
   document.getElementById('status').textContent=on?'running SB + URR…':'';
 }
-let LASTQ='';
+function ctx(){return (document.getElementById('cont').checked&&LASTANS)?LASTANS:'';}
 async function ask(){
   const q=document.getElementById('q').value.trim(); if(!q)return; busy(true); LASTQ=q;
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value})});
+      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value,context:ctx()})});
     const d=await r.json(); render(d);
     HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
   }catch(e){document.getElementById('out').innerHTML='<div class=card>error: '+esc(''+e)+'</div>'}
   busy(false);
+}
+function dictate(){
+  const R=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!R){document.getElementById('ustat').textContent='voice input not supported in this browser';return;}
+  const rec=new R();rec.lang='en-US';rec.interimResults=false;const b=document.getElementById('mic');
+  b.classList.add('on');b.textContent='●';
+  rec.onresult=e=>{const t=e.results[0][0].transcript;const q=document.getElementById('q');q.value=(q.value?q.value+' ':'')+t;};
+  rec.onend=()=>{b.classList.remove('on');b.innerHTML='&#127908;';};rec.onerror=rec.onend;rec.start();
+}
+function doUpload(){
+  const inp=document.getElementById('file');const f=inp.files&&inp.files[0];
+  const st=document.getElementById('ustat'); if(!f){st.textContent='choose a file first';return;}
+  const textlike=/\.(txt|md|markdown|csv|tsv|json|log|py|js|html|xml|ya?ml)$/i.test(f.name);
+  const fr=new FileReader();st.textContent='reading…';
+  fr.onload=async()=>{
+    const body={filename:f.name,model:document.getElementById('model').value};
+    if(textlike)body.text=fr.result; else body.b64=(''+fr.result).split(',')[1]||'';
+    st.textContent='reviewing…';busy(true);LASTQ='file: '+f.name;
+    try{const r=await fetch('/upload',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      const d=await r.json(); if(d.error){st.textContent='error: '+esc(d.error);}else{render(d);
+        st.textContent=d.upload?('read '+d.upload.chars+' chars'+(d.upload.note?' · '+d.upload.note:'')):'done';}
+    }catch(e){st.textContent='error'} busy(false);
+  };
+  if(textlike)fr.readAsText(f); else fr.readAsDataURL(f);
 }
 function tally(arr){const m={};(arr||[]).forEach(x=>m[x]=(m[x]||0)+1);
   return Object.entries(m).map(([k,v])=>esc(k)+(v>1?' ×'+v:'')).join(', ')||'—';}
@@ -293,14 +415,16 @@ function walkCard(d){const w=d.walk; if(!w||!w.steps)return '';
   const rows=w.steps.map(s=>'<div class=lane><span class="vd '+s.verdict+'">●</span> <b>'+esc(s.sb_id)+'</b> '+esc(s.sb_name)+' → '+esc(s.urr_id)+': <b>'+esc(s.verdict)+'</b>'+(s.memory_written?' <span class=memok>memory ✓</span>':'')+'<br><span class=muted style="margin-left:18px">'+esc(s.why)+'</span></div>').join('');
   return '<div class=card><div class=k>Node walk · SB ↔ URR <span class=num>'+w.node_count+' nodes · '+w.hold_count+' holds</span></div>'+rows+'</div>';}
 function reviewQueue(d){const h=(d.walk&&d.walk.holds)||[]; if(!h.length)return '';
-  const cards=h.map(x=>'<div class=hold><div><b>'+esc(x.sb_id)+'</b> '+esc(x.name)+' <span class="badge warn">hold</span></div>'+
-    '<div class=muted style="margin:4px 0">'+esc(x.why)+'</div>'+
-    '<textarea class="in" id="hd_'+esc(x.sb_id)+'" placeholder="paste data / source (optional), then Add data & re-run" style="min-height:46px"></textarea>'+
-    '<div class=hactions><button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'add_data\')">Add data & re-run</button>'+
+  const cards=h.map(x=>{const a=x.ask||{};
+    return '<div class=hold><div><b>'+esc(x.sb_id)+'</b> '+esc(x.name)+' <span class="badge warn">hold</span></div>'+
+    '<div class=fivew><div><b>What</b>'+esc(a.what||x.why||'—')+'</div><div><b>Why</b>'+esc(a.why||'—')+'</div>'+
+    '<div><b>How</b>'+esc(a.how||'—')+'</div><div><b>When</b>'+esc(a.when||'now')+'</div></div>'+
+    '<textarea class=in id="hd_'+esc(x.sb_id)+'" placeholder="paste the data / source asked for, then Add data & re-run" style="min-height:46px"></textarea>'+
+    '<div class=hactions><button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'add_data\')">Add data &amp; re-run</button>'+
     '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'reloop\')">Re-loop</button>'+
-    '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'approve\')">Approve</button></div></div>').join('');
+    '<button class=btn onclick="review(\''+esc(x.sb_id)+'\',\'approve\')">Approve</button></div></div>';}).join('');
   return '<div class=card><div class=k>Human review queue <span class=num>'+h.length+'</span></div>'+
-    '<div class=muted style="margin-bottom:8px">Each held node is yours to clear: add the missing data, re-loop, or approve as-is.</div>'+cards+'</div>';}
+    '<div class=muted style="margin-bottom:8px">Each held node tells you exactly what it needs. Add it, re-loop, or approve as-is.</div>'+cards+'</div>';}
 async function review(id,action){
   const ta=document.getElementById('hd_'+id); const data=ta?ta.value.trim():'';
   const st=document.getElementById('out'); st.style.opacity=.5;
@@ -309,7 +433,7 @@ async function review(id,action){
     const d=await r.json(); if(d.resolved){st.style.opacity=1; return;} render(d);
   }catch(e){}; st.style.opacity=1;}
 function render(d){
-  const o=d.output||{},lanes=o.lanes||{};
+  LASTD=d; const o=d.output||{},lanes=o.lanes||{}; LASTANS=o.answer||'';
   const firedStages=new Set(),counts={};
   (d.trace||[]).forEach(t=>{const s=stageOf(t.node_id); if(s){firedStages.add(s); counts[s]=(counts[s]||0)+1;}});
   drawPyr(firedStages,counts);
@@ -318,6 +442,7 @@ function render(d){
     return esc((t.node_id||'').padEnd(7))+' '+esc((t.action||'').padEnd(20))+' '+esc(t.status)+h+'  '+esc(t.note||'')}).join('<br>');
   document.getElementById('out').innerHTML=
     '<div class=fade>'+
+    (d.upload?'<div class=card><div class=k>File reviewed</div><div class=lane><b>'+esc(d.upload.filename)+'</b> · '+d.upload.chars+' chars'+(d.upload.note?' · <span class=hl>'+esc(d.upload.note)+'</span>':'')+'</div></div>':'')+
     '<div class=card><div class=k>Answer</div><div class=ans>'+esc(o.answer)+'</div>'+
       '<div class=meter><i style="width:'+confPct(o.confidence)+'%"></i></div>'+
       '<div class=badges><span class=badge>'+esc(o.classification)+'</span>'+
@@ -326,7 +451,8 @@ function render(d){
       '<span class=badge>penetration <b>'+esc(o.penetration_score)+'</b></span>'+
       (o.public_safe?'<span class=badge>public-safe</span>':'')+'</div>'+
       (confWhy(d)?'<div class=why>'+confWhy(d)+'</div>':'')+
-      '<div class=fals>falsifier · '+esc(o.falsifier)+'</div></div>'+
+      '<div class=fals>falsifier · '+esc(o.falsifier)+'</div>'+
+      '<div class=hactions><button class="btn sm" onclick="downloadReport(\'md\')">⬇ Markdown</button><button class="btn sm" onclick="downloadReport(\'csv\')">⬇ CSV</button></div></div>'+
     walkCard(d)+reviewQueue(d)+
     '<div class=card><div class=k>Eternal example & wisdom match</div>'+m+'</div>'+
     '<div class=card><div class=k>Core Gate · human layer (SB-10)</div>'+
@@ -349,6 +475,50 @@ function render(d){
       '<div class=card><div class=trace>'+tr+'</div><div class=muted style="margin-top:10px">memory: '+
       esc(JSON.stringify(d.memory))+' · clone learns 1 example each run</div></div></details>'+
     '</div>';
+}
+function downloadReport(fmt){
+  const d=LASTD; if(!d)return; const o=d.output||{}; let body,mime,ext;
+  if(fmt==='csv'){
+    const rows=[['field','value'],['question',LASTQ],['answer',(o.answer||'').replace(/\n/g,' ')],
+      ['classification',o.classification],['evidence',o.evidence_tag],['confidence',o.confidence],
+      ['penetration',o.penetration_score],['falsifier',o.falsifier]];
+    ((d.walk&&d.walk.steps)||[]).forEach(s=>rows.push(['node '+s.sb_id,s.verdict+' — '+s.why]));
+    body=rows.map(r=>r.map(c=>'"'+(''+(c==null?'':c)).replace(/"/g,'""')+'"').join(',')).join('\n');
+    mime='text/csv';ext='csv';
+  }else{
+    let md='# Sourceborn report\n\n**Ask:** '+LASTQ+'\n\n## Answer\n\n'+(o.answer||'')+'\n\n';
+    md+='- classification: '+o.classification+'\n- evidence: '+o.evidence_tag+'\n- confidence: '+o.confidence+'\n- penetration: '+o.penetration_score+'\n\n**Falsifier:** '+o.falsifier+'\n\n## Node walk\n\n';
+    ((d.walk&&d.walk.steps)||[]).forEach(s=>md+='- **'+s.sb_id+'** '+s.sb_name+' → '+s.verdict+' — '+s.why+'\n');
+    body=md;mime='text/markdown';ext='md';
+  }
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([body],{type:mime}));
+  a.download='sourceborn-report.'+ext;a.click();
+}
+async function loadReport(){
+  const st=document.getElementById('repstat');st.textContent='loading…';
+  try{const d=await (await fetch('/memory/report')).json();renderReport(d,'Memory report (live)');st.textContent='';}
+  catch(e){st.textContent='error'}
+}
+function renderReport(rep,title){
+  const nodes=(rep.nodes||[]).map(n=>'<div class=repn><div class=h><span><b>'+esc(n.id)+'</b> '+esc(n.name)+'</span><span class=muted>'+n.entry_count+' entries</span></div>'+
+    (n.recent||[]).map(e=>'<div class=e>'+esc(e.content)+(e.tags&&e.tags.length?' <span class=muted>['+esc(e.tags.join(', '))+']</span>':'')+'</div>').join('')+'</div>').join('');
+  document.getElementById('out').innerHTML='<div class="card fade"><div class=k>'+esc(title)+
+    ' <span class=num>'+((rep.totals||{}).total_memory_entries||0)+' entries · '+((rep.totals||{}).nodes_with_brains||0)+' nodes</span></div>'+
+    '<div class=muted style="margin-bottom:8px">'+esc(rep.at||'')+'</div><div class=rep>'+(nodes||'<span class=muted>nothing stored yet</span>')+'</div></div>';
+}
+async function saveSnapshot(){
+  const st=document.getElementById('repstat');st.textContent='saving…';
+  try{await fetch('/snapshot',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+    st.textContent='snapshot saved'; loadSnapshots();}catch(e){st.textContent='error'}
+}
+async function loadSnapshots(){
+  try{const list=await (await fetch('/snapshots')).json();
+    document.getElementById('snaps').innerHTML=list.length?('<div class=k style="margin-top:8px">Snapshots</div>'+
+      list.map(s=>'<a class="hist" style="cursor:pointer" onclick="showSnap(\''+esc(s.id)+'\')">'+esc(s.name)+' · '+((s.total||{}).total_memory_entries||0)+'</a>').join('')):'';
+  }catch(e){}
+}
+async function showSnap(id){
+  try{const d=await (await fetch('/snapshot?id='+encodeURIComponent(id))).json();renderReport(d,'Snapshot · '+(d.name||id));}catch(e){}
 }
 async function feed(){
   const text=document.getElementById('ftext').value.trim(); if(!text)return;
@@ -403,7 +573,7 @@ async function weeklyUpdate(){
   try{const d=await (await fetch('/brains/update',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     b.textContent='updated '+d.updated+'/'+d.total;}catch(e){b.textContent='error'}
 }
-loadBrains();
+loadBrains(); loadSnapshots();
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))ask()});
 </script></div></body></html>"""
 
@@ -430,8 +600,19 @@ class Handler(BaseHTTPRequestHandler):
                                "brains": len(ENGINE.brains.all()),
                                "weekly": scheduler.status(SB_ROOT)})
             self._send(200, body.encode(), "application/json")
+        elif path == "/memory/report":
+            self._send(200, json.dumps(_memory_report()).encode(), "application/json")
+        elif path == "/snapshots":
+            self._send(200, json.dumps(_list_snapshots()).encode(), "application/json")
+        elif path == "/snapshot":
+            sid = re.sub(r"[^0-9A-Za-z]", "", (qs.get("id") or [""])[0])
+            fp = os.path.join(SNAP_DIR, sid + ".json")
+            if not sid or not os.path.exists(fp):
+                self._send(404, b'{"error":"no such snapshot"}', "application/json")
+                return
+            with open(fp, encoding="utf-8") as f:
+                self._send(200, f.read().encode(), "application/json")
         elif path == "/brains":
-            # settings of every node brain, grouped by stage
             payload = {g: [{
                 "id": c.node_id, "name": c.name, "kind": c.kind, "stage": c.stage,
                 "human_review": c.human_review, "urr_gate": c.urr_gate,
@@ -480,11 +661,18 @@ class Handler(BaseHTTPRequestHandler):
             stats = _ingest_text((data.get("name") or "note").strip(), text)
             self._send(200, json.dumps({"ok": True, **stats}).encode(), "application/json")
             return
-        if self.path == "/brains/update":   # weekly brain update (Principle 12)
+        if self.path == "/snapshot":
+            self._send(200, json.dumps(_save_snapshot(data.get("name", ""))).encode(),
+                       "application/json")
+            return
+        if self.path == "/upload":
+            self._upload(data)
+            return
+        if self.path == "/brains/update":
             self._send(200, json.dumps(ENGINE.brains.weekly_update()).encode(),
                        "application/json")
             return
-        if self.path == "/brain/settings":  # edit one node brain's settings
+        if self.path == "/brain/settings":
             node_id = (data.get("id") or "").strip()
             try:
                 cfg = ENGINE.brains.update(
@@ -495,7 +683,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "config": asdict(cfg)}).encode(),
                        "application/json")
             return
-        if self.path == "/review":          # act on a URR hold (review-after)
+        if self.path == "/review":
             self._review(data)
             return
         if self.path != "/ask":
@@ -506,18 +694,22 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 self._send(400, b'{"error":"empty question"}', "application/json")
                 return
+            context = (data.get("context") or "").strip()
+            if context:                      # same-chat continuation (thread)
+                question = (question +
+                            "\n\n[continuing our thread — your prior answer]:\n"
+                            + context[:1000])
             model = get_model(data.get("model", "offline"))
-            # The real loop: per-node SB <-> URR walk + human review queue.
             walk = ENGINE.run_walk(question, model=model)
-            res = walk["result"]
-            self._send(200, self._walk_payload(res, walk, model.name), "application/json")
+            self._send(200, self._walk_payload(walk["result"], walk, model.name),
+                       "application/json")
         except Exception as exc:
             self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
 
-    # -- shared payload + review actions ----------------------------------
+    # -- shared payload + actions -----------------------------------------
     @staticmethod
-    def _walk_payload(res, walk, model_name: str) -> bytes:
-        return json.dumps({
+    def _walk_payload(res, walk, model_name: str, extra: dict | None = None) -> bytes:
+        payload = {
             "output": asdict(res.output),
             "micro_questions": res.micro_questions,
             "matched_examples": res.matched_examples,
@@ -526,12 +718,41 @@ class Handler(BaseHTTPRequestHandler):
             "memory": ENGINE.memory.stats(),
             "model": model_name,
             "walk": walk["walk"],
-        }).encode()
+        }
+        if extra:
+            payload.update(extra)
+        return json.dumps(payload).encode()
+
+    def _upload(self, data: dict) -> None:
+        """Phase 1: review an uploaded file. Extract text (stdlib), run the
+        SB<->URR walk over it, and fold it into the brain."""
+        filename = (data.get("filename") or "upload").strip()
+        text = data.get("text")
+        if text is None and data.get("b64"):
+            try:
+                text, note = extract_text(filename, base64.b64decode(data["b64"]))
+            except Exception as exc:
+                self._send(400, json.dumps({"error": f"decode failed: {exc}"}).encode(),
+                           "application/json")
+                return
+        else:
+            text, note = (text or ""), ""
+        text = (text or "").strip()
+        if not text:
+            self._send(200, json.dumps({"error": note or "no text found in file"}).encode(),
+                       "application/json")
+            return
+        _ingest_text(filename, text)                 # compounds the brain
+        model = get_model(data.get("model", "offline"))
+        ask = f"Review this uploaded file '{filename}' and respond:\n\n{text[:6000]}"
+        walk = ENGINE.run_walk(ask, model=model)
+        self._send(200, self._walk_payload(
+            walk["result"], walk, model.name,
+            {"upload": {"filename": filename, "chars": len(text), "note": note}}),
+            "application/json")
 
     def _review(self, data: dict) -> None:
-        """Human review queue: approve / add data / re-loop a held node.
-        add-data folds the pasted fact into the brain and re-runs the walk so
-        the held node clears and confidence rises; re-loop just re-walks."""
+        """Human review queue: approve / add data / re-loop a held node."""
         question = (data.get("question") or "").strip()
         action = (data.get("action") or "").strip()
         node_id = (data.get("id") or "").strip()
@@ -546,11 +767,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         model = get_model(data.get("model", "offline"))
         if action == "add_data" and extra:
-            _ingest_text(f"review-{node_id or 'note'}", extra)   # compounds the brain
+            _ingest_text(f"review-{node_id or 'note'}", extra)
             walk = ENGINE.run_walk(question, model=model, live_override=extra)
-        else:                                                    # re-loop
-            walk = ENGINE.run_walk(question, model=model,
-                                   live_override=extra or None)
+        else:
+            walk = ENGINE.run_walk(question, model=model, live_override=extra or None)
         self._send(200, self._walk_payload(walk["result"], walk, model.name),
                    "application/json")
 

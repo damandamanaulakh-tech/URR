@@ -289,16 +289,21 @@ class SourcebornEngine:
         draft = active_model.complete(
             system=self.persona.voice_guidance(),
             prompt=(
-                "Answer the ASK from the deepest matching example, grounded in live "
-                "fact, in the user's voice. Reason top-down from the bigger picture. "
-                "Be honest about gaps; never overclaim.\n"
+                "Answer in the user's voice. These RULES fix known weak spots — be "
+                "DIRECT, BRIEF, technically precise, and name your evidence:\n"
+                "1) Open with 'Direct answer:' — 1-3 sentences that answer the literal "
+                "ASK concretely (the key-in-hand). No preamble, no throat-clearing.\n"
+                "2) Then at most ONE short 'Why:' paragraph — the deeper reason from "
+                "the matched example. Stop there; do not pad, repeat, or sermonise.\n"
+                "3) Name any structure / number / figure you used as evidence. If there "
+                "is no live fact, say so in one clause — never invent it.\n"
+                "4) End with one 'Falsifier:' line — the fact that would prove it wrong.\n"
                 f"ASK: {raw_text}\n"
                 f"MATCHED EXAMPLES (eternal): {matched}\n"
                 f"LIVE FACT: {live or 'none — say so, do not invent'}\n"
                 f"CORE GATE dominant lens: {core['dominant_lens']}; active: "
                 f"{[k for k, v in core['lenses'].items() if v['active']]}\n"
-                f"EVIDENCE: {ladder_conf} (rungs {[e['evidence_tag'] for e in ledger]})\n"
-                "Deliver a clean answer, then one falsifier line."
+                f"EVIDENCE: {ladder_conf} (rungs {[e['evidence_tag'] for e in ledger]})"
             ),
         )
 
@@ -450,6 +455,37 @@ class SourcebornEngine:
             return "Embodied resistance — doesn't sit right yet; re-loop."
         return "Clear."
 
+    @staticmethod
+    def _walk_ask(node_id: str, halt: str | None, target: str) -> dict:
+        """The human gate, made explicit: tell the user exactly *what* to give,
+        *why*, *how*, and *when* — so a hold is never a blank 'Evidence'."""
+        h = halt or ""
+        if h == HaltType.EVIDENCE.value or node_id == "SB-33":
+            return {"what": "A current source or data point that backs the claim",
+                    "why": "The claim isn't grounded in live fact yet (stays Low)",
+                    "how": "Paste a link, figure or number below — or upload the source file",
+                    "when": "Now — before it can be rated FACT",
+                    "for": target}
+        if h == HaltType.SAFETY.value:
+            return {"what": "The legitimate context / authorization",
+                    "why": "This touches a hard safety line — it is mapped, never executed",
+                    "how": "State who you are and the lawful purpose",
+                    "when": "Before anything proceeds", "for": target}
+        if h == HaltType.LOGIC.value:
+            return {"what": "Proof for the absolute claim, or softer wording",
+                    "why": "An over-claim (always / never / guaranteed) was detected",
+                    "how": "Give a counter-example test, or qualify the statement",
+                    "when": "Now", "for": target}
+        if node_id == "SB-40":
+            return {"what": "Your approval to merge the connected sources",
+                    "why": "Two or more sources recur — a merge needs a human gate",
+                    "how": "Approve to combine them, or re-loop to keep them separate",
+                    "when": "Now", "for": target}
+        return {"what": "Your read on whether this holds",
+                "why": "Doubt bit or the node didn't sit right",
+                "how": "Add a note/data, re-loop, or approve as-is",
+                "when": "Now", "for": target}
+
     def run_walk(self, raw_text: str, model: BaseModel | None = None,
                  live_override: str | None = None) -> dict:
         """Walk the fired SB checkpoints one by one. After each SB node a URR
@@ -493,7 +529,8 @@ class SourcebornEngine:
             steps.append(step)
             if verdict == "hold":
                 holds.append({"sb_id": step.sb_id, "name": step.sb_name,
-                              "urr_id": urr_id, "why": why, "halt": step.halt})
+                              "urr_id": urr_id, "why": why, "halt": step.halt,
+                              "ask": self._walk_ask(t.node_id, step.halt, step.sb_name)})
         self.memory.master_log({"event": "walk_complete",
                                 "nodes": len(steps), "holds": len(holds)})
         return {"result": res, "walk": {
