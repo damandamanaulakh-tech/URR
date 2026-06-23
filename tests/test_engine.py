@@ -263,6 +263,39 @@ def test_default_model_prefers_env_pref():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
+def test_extract_text_formats():
+    import io, zipfile
+    from sourceborn.extract import extract_text
+    t, note = extract_text("a.csv", b"x,y\n1,2")
+    assert "x,y" in t and note == ""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml",
+                   "<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p>"
+                   "<w:p><w:r><w:t>World</w:t></w:r></w:p></w:body></w:document>")
+    dt, _ = extract_text("a.docx", buf.getvalue())
+    assert "Hello" in dt and "World" in dt
+    buf2 = io.BytesIO()
+    with zipfile.ZipFile(buf2, "w") as z:
+        z.writestr("xl/sharedStrings.xml",
+                   "<sst><si><t>Param</t></si><si><t>Score</t></si></sst>")
+        z.writestr("xl/worksheets/sheet1.xml",
+                   '<worksheet><sheetData><row><c t="s"><v>0</v></c>'
+                   '<c t="s"><v>1</v></c></row><row><c><v>9</v></c></row>'
+                   '</sheetData></worksheet>')
+    xt, _ = extract_text("t.xlsx", buf2.getvalue())
+    assert "Param" in xt and "Score" in xt and "9" in xt
+
+
+def test_walk_holds_carry_human_ask():
+    eng = _engine()
+    walk = eng.run_walk("Prove with current data that this is true.")
+    holds = walk["walk"]["holds"]
+    assert holds                                   # evidence gap -> at least one hold
+    a = holds[0]["ask"]
+    assert a["what"] and a["why"] and a["how"] and a["when"]
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
