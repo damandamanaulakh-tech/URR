@@ -37,7 +37,7 @@ from urllib.parse import urlparse, parse_qs
 from . import scheduler
 from .engine import SourcebornEngine
 from .extract import extract_text
-from .llm import get_model, model_status
+from .llm import get_model, model_status, generate_image
 from .models import _now
 
 SB_ROOT = os.environ.get("SB_ROOT", ".sourceborn")
@@ -303,6 +303,7 @@ details[open]>summary:before{content:"\25be  "}
       <div class=toolbar style="border:0;padding-top:8px">
         <span class=field><input type=file id=file multiple accept=".txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf,.log,.py,.js"></span>
         <button class=btn onclick=doUpload()>Review file</button>
+        <button class=btn onclick=genImage()>Generate image</button>
         <span class=status id=ustat></span>
       </div>
     </div>
@@ -411,6 +412,20 @@ function doUpload(){
     if(textlike)fr.readAsText(f); else fr.readAsDataURL(f);
   };
   next();
+}
+function genImage(){
+  const p=document.getElementById('q').value.trim();const st=document.getElementById('ustat');
+  if(!p){st.textContent='type an image prompt in the box above first';return;}
+  st.textContent='generating image…';busy(true);
+  fetch('/generate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({prompt:p})})
+   .then(r=>r.json()).then(d=>{
+     if(d.error){st.textContent='error: '+esc(d.error);}
+     else{const src=d.url||('data:image/png;base64,'+(d.b64||''));
+       document.getElementById('out').innerHTML='<div class="card fade"><div class=k>Generated image</div>'+
+         '<img src="'+src+'" alt="generated" style="max-width:100%;border-radius:12px">'+
+         '<div class=muted style="margin-top:6px">'+esc(p)+'</div></div>';
+       st.textContent='done';}
+   }).catch(e=>{st.textContent='error'}).finally(()=>busy(false));
 }
 function tally(arr){const m={};(arr||[]).forEach(x=>m[x]=(m[x]||0)+1);
   return Object.entries(m).map(([k,v])=>esc(k)+(v>1?' ×'+v:'')).join(', ')||'—';}
@@ -700,6 +715,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/review":
             self._review(data)
             return
+        if self.path == "/generate":
+            prompt = (data.get("prompt") or "").strip()
+            if not prompt:
+                self._send(400, b'{"error":"empty prompt"}', "application/json")
+                return
+            self._send(200, json.dumps(generate_image(prompt)).encode(), "application/json")
+            return
         if self.path != "/ask":
             self._send(404, b'{"error":"not found"}', "application/json")
             return
@@ -741,6 +763,25 @@ class Handler(BaseHTTPRequestHandler):
         """Phase 1: review an uploaded file. Extract text (stdlib), run the
         SB<->URR walk over it, and fold it into the brain."""
         filename = (data.get("filename") or "upload").strip()
+        img_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+        if data.get("b64") and filename.lower().endswith(img_exts):
+            model = get_model(data.get("model", "offline"))
+            low = filename.lower()
+            mime = ("image/jpeg" if low.endswith((".jpg", ".jpeg")) else
+                    "image/webp" if low.endswith(".webp") else
+                    "image/gif" if low.endswith(".gif") else "image/png")
+            seen = model.complete_vision(
+                "You are a precise visual analyst in the user's voice.",
+                f"Review the image '{filename}': what it shows, key details, and "
+                "anything notable or worth flagging.", data["b64"], mime)
+            _ingest_text(filename, f"[image '{filename}' seen]:\n{seen}")
+            walk = ENGINE.run_walk(
+                f"Review this uploaded image '{filename}':\n\n{seen}", model=model)
+            self._send(200, self._walk_payload(
+                walk["result"], walk, model.name,
+                {"upload": {"filename": filename, "chars": len(seen),
+                            "note": "vision review"}}), "application/json")
+            return
         text = data.get("text")
         if text is None and data.get("b64"):
             try:
