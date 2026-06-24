@@ -66,6 +66,28 @@ def _ingest_text(name: str, text: str) -> dict:
     return {"memory": ENGINE.memory.stats(), "examples": len(ENGINE.persona.examples)}
 
 
+def _library(preview: int = 160) -> dict:
+    """List the files/notes fed into the brain — the user's 'library'."""
+    items = []
+    folder = os.environ.get("SB_INGEST_CORPUS")
+    if folder and os.path.isdir(folder):
+        for fn in sorted(os.listdir(folder)):
+            p = os.path.join(folder, fn)
+            if os.path.isfile(p):
+                try:
+                    t = open(p, encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    t = ""
+                items.append({"name": fn, "chars": len(t), "preview": t[:preview]})
+    if not items:                       # fallback: the clone's learned examples
+        for ex in list(getattr(ENGINE.persona, "examples", []))[-50:]:
+            items.append({"name": getattr(ex, "question", "note"),
+                          "chars": len(getattr(ex, "answer", "") or ""),
+                          "preview": (getattr(ex, "answer", "") or "")[:preview]})
+    return {"files": items, "count": len(items),
+            "folder": folder or "(in-memory — set SB_INGEST_CORPUS to persist files)"}
+
+
 def _memory_report(limit: int = 3) -> dict:
     """A snapshot of what each memory node holds — counts, last update, and the
     most recent entries (so the user can see exactly what was added, and compare
@@ -283,6 +305,10 @@ details[open]>summary:before{content:"\25be  "}
         <div class=hactions><button class="btn sm" onclick=weeklyUpdate()>Weekly update</button><span class=status id=bstat></span></div>
         <div id=brains style="margin-top:6px"></div>
       </div></details>
+      <details class=acc><summary>Files (<span id=lcount>0</span>)</summary><div class=sec>
+        <div class=hactions><button class="btn sm" onclick=loadLibrary()>Refresh</button><span class=status id=lstat></span></div>
+        <div id=libfiles style="margin-top:6px"></div>
+      </div></details>
     </details>
   </div>
 </nav>
@@ -329,7 +355,7 @@ function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':
 function confClass(c){c=(''+c).toLowerCase();return c=='high'?'ok':c=='medium'?'warn':c=='low'?'bad':''}
 function confPct(c){c=(''+c).toLowerCase();return c=='high'?92:c=='medium'?62:c=='low'?32:50}
 let HIST=JSON.parse(localStorage.getItem('sb_hist')||'[]');
-let LASTQ='',LASTD=null,LASTANS='';
+let LASTQ='',LASTD=null,LASTANS='',THREAD=[];
 
 fetch('/health').then(r=>r.json()).then(d=>{
   const sel=document.getElementById('model');
@@ -344,7 +370,7 @@ fetch('/health').then(r=>r.json()).then(d=>{
   document.getElementById('bpill').textContent=d.brains||95;
   const set=d.weekly&&d.weekly.last_weekly_update;
   document.getElementById('wpill').innerHTML='weekly <b>'+(set?'active':'due')+'</b>';
-}); drawPyr(new Set(),{}); drawHist();
+}); drawPyr(new Set(),{}); drawHist(); loadLibrary();
 document.getElementById('examples').innerHTML=EXAMPLES.map(e=>'<span class=chip>'+esc(e)+'</span>').join('');
 document.querySelectorAll('#examples .chip').forEach((c,i)=>c.onclick=()=>{
   const q=document.getElementById('q');q.value=EXAMPLES[i];q.focus()});
@@ -370,7 +396,8 @@ function busy(on){
   ic.className=on?'spin':''; ic.innerHTML=on?'':'&#9654;';
   document.getElementById('status').textContent=on?'running SB + URR…':'';
 }
-function ctx(){return (document.getElementById('cont').checked&&LASTANS)?LASTANS:'';}
+function ctx(){ if(!document.getElementById('cont').checked) return '';
+  return THREAD.slice(-3).map(t=>'You asked: '+t.q+'\nReply was: '+t.a).join('\n\n'); }
 async function ask(){
   const q=document.getElementById('q').value.trim(); if(!q)return; busy(true); LASTQ=q;
   try{
@@ -378,6 +405,7 @@ async function ask(){
       body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value,context:ctx()})});
     const d=await r.json(); render(d);
     HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
+    THREAD.push({q:q,a:LASTANS}); if(THREAD.length>8)THREAD=THREAD.slice(-8);
   }catch(e){document.getElementById('out').innerHTML='<div class=card>error: '+esc(''+e)+'</div>'}
   busy(false);
 }
@@ -426,6 +454,16 @@ function genImage(){
          '<div class=muted style="margin-top:6px">'+esc(p)+'</div></div>';
        st.textContent='done';}
    }).catch(e=>{st.textContent='error'}).finally(()=>busy(false));
+}
+async function loadLibrary(){
+  const st=document.getElementById('lstat');st.textContent='loading…';
+  try{const d=await (await fetch('/library')).json();
+    document.getElementById('lcount').textContent=d.count||0;
+    document.getElementById('libfiles').innerHTML=(d.files||[]).map(f=>
+      '<div class=repn><div class=h><span><b>'+esc(f.name)+'</b></span><span class=muted>'+f.chars+' chars</span></div>'+
+      '<div class=e>'+esc(f.preview||'')+'</div></div>').join('')||'<span class=muted>no files yet — upload a file or feed the brain</span>';
+    st.textContent='';
+  }catch(e){st.textContent='error'}
 }
 function tally(arr){const m={};(arr||[]).forEach(x=>m[x]=(m[x]||0)+1);
   return Object.entries(m).map(([k,v])=>esc(k)+(v>1?' ×'+v:'')).join(', ')||'—';}
@@ -631,6 +669,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "reply": reply[:400]}).encode(), "application/json")
         elif path == "/memory/report":
             self._send(200, json.dumps(_memory_report()).encode(), "application/json")
+        elif path == "/library":
+            self._send(200, json.dumps(_library()).encode(), "application/json")
         elif path == "/snapshots":
             self._send(200, json.dumps(_list_snapshots()).encode(), "application/json")
         elif path == "/snapshot":
