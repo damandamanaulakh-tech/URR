@@ -323,11 +323,10 @@ details[open]>summary:before{content:"\25be  "}
         <button class=iconbtn id=mic title="voice to text" onclick=dictate()>&#127908;</button>
         <span class=field><select id=model title="base model"></select></span>
         <label class=switch title="keep the thread — fold the last answer into the next ask"><input type=checkbox id=cont checked><span class=track></span> continue thread</label>
-        <label class=switch><input type=checkbox id=pub><span class=track></span> public-safe</label>
         <span class=status id=status></span>
       </div>
       <div class=toolbar style="border:0;padding-top:8px">
-        <span class=field><input type=file id=file multiple accept=".txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf,.log,.py,.js"></span>
+        <span class=field><input type=file id=file multiple></span>
         <button class=btn onclick=doUpload()>Review file</button>
         <button class=btn onclick=genImage()>Generate image</button>
         <span class=status id=ustat></span>
@@ -402,7 +401,7 @@ async function ask(){
   const q=document.getElementById('q').value.trim(); if(!q)return; busy(true); LASTQ=q;
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({question:q,public:document.getElementById('pub').checked,model:document.getElementById('model').value,context:ctx()})});
+      body:JSON.stringify({question:q,model:document.getElementById('model').value,context:ctx()})});
     const d=await r.json(); render(d);
     HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
     THREAD.push({q:q,a:LASTANS}); if(THREAD.length>8)THREAD=THREAD.slice(-8);
@@ -503,6 +502,7 @@ function render(d){
     return esc((t.node_id||'').padEnd(7))+' '+esc((t.action||'').padEnd(20))+' '+esc(t.status)+h+'  '+esc(t.note||'')}).join('<br>');
   document.getElementById('out').innerHTML=
     '<div class=fade>'+
+    ((document.getElementById('cont').checked&&THREAD.length)?'<div class=card><div class=k>Conversation <span class=num>'+THREAD.length+'</span></div>'+THREAD.map(t=>'<div class=lane><b>You</b> '+esc(t.q)+'<br><span class=muted>'+esc((t.a||'').slice(0,240))+(t.a&&t.a.length>240?'…':'')+'</span></div>').join('')+'</div>':'')+
     (d.upload?'<div class=card><div class=k>File reviewed</div><div class=lane><b>'+esc(d.upload.filename)+'</b> · '+d.upload.chars+' chars'+(d.upload.note?' · <span class=hl>'+esc(d.upload.note)+'</span>':'')+'</div></div>':'')+
     '<div class=card><div class=k>Answer</div><div class=ans>'+esc(o.answer)+'</div>'+
       '<div class=meter><i style="width:'+confPct(o.confidence)+'%"></i></div>'+
@@ -510,7 +510,6 @@ function render(d){
       '<span class=badge>evidence <b>'+esc(o.evidence_tag)+'</b></span>'+
       '<span class="badge '+confClass(o.confidence)+'">confidence <b>'+esc(o.confidence)+'</b></span>'+
       '<span class=badge>penetration <b>'+esc(o.penetration_score)+'</b></span>'+
-      (o.public_safe?'<span class=badge>public-safe</span>':'')+'</div>'+
       (confWhy(d)?'<div class=why>'+confWhy(d)+'</div>':'')+
       '<div class=fals>falsifier · '+esc(o.falsifier)+'</div>'+
       '<div class=hactions><button class="btn sm" onclick="speak()">🔊 Read aloud</button><button class="btn sm" onclick="downloadReport(\'md\')">⬇ Markdown</button><button class="btn sm" onclick="downloadReport(\'csv\')">⬇ CSV</button></div></div>'+
@@ -774,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
             if context:                      # same-chat continuation (thread)
                 question = (question +
                             "\n\n[continuing our thread — your prior answer]:\n"
-                            + context[:1000])
+                            + context)
             model = get_model(data.get("model", "offline"))
             walk = ENGINE.run_walk(question, model=model)
             self._send(200, self._walk_payload(walk["result"], walk, model.name),
@@ -839,7 +838,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         _ingest_text(filename, text)                 # compounds the brain
         model = get_model(data.get("model", "offline"))
-        ask = f"Review this uploaded file '{filename}' and respond:\n\n{text[:6000]}"
+        ask = f"Review this uploaded file '{filename}' and respond:\n\n{text}"
         walk = ENGINE.run_walk(ask, model=model)
         self._send(200, self._walk_payload(
             walk["result"], walk, model.name,
