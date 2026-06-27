@@ -215,6 +215,60 @@ class OpenRouterModel(_OpenAICompatible):
                       "X-Title": "Sourceborn"}
 
 
+class LocalCaptured(Exception):
+    """Phase-1 unwind for the on-device (browser-GPU) lane. ``CaptureModel``
+    raises this the instant the engine has assembled its genuine output prompt,
+    so the user's WebGPU model can complete *that* prompt on their own machine.
+    Carries the exact ``system`` + ``prompt`` the engine would have sent a cloud
+    model — nothing has gone over the network."""
+
+    def __init__(self, system: str, prompt: str) -> None:
+        super().__init__("local prompt captured")
+        self.system = system
+        self.prompt = prompt
+
+
+class CaptureModel:
+    """On-device lane, phase 1. Never generates and never touches the network.
+    It lets the engine run far enough to build the real output prompt, then
+    raises :class:`LocalCaptured` so that prompt can be handed to the browser
+    for on-GPU completion. Privacy: this calls no provider at all."""
+
+    name = "local"
+    available = True
+
+    def complete(self, system: str, prompt: str) -> str:
+        raise LocalCaptured(system, prompt)
+
+    def complete_vision(self, system: str, prompt: str, image_b64: str,
+                        mime: str = "image/png") -> str:
+        raise LocalCaptured(system, prompt)
+
+
+class LocalBridgeModel:
+    """On-device lane, phase 2. The user's GPU already produced the draft in the
+    browser; this hands that text back to the engine so the FULL SB + URR walk
+    frames, doubts, and falsifies it. The prompt never reached a third-party
+    LLM — only the on-device draft returns here for verification."""
+
+    name = "local"
+    available = True
+
+    def __init__(self, answer: str = "") -> None:
+        self.answer = (answer or "").strip() or "[on-device model returned no text]"
+
+    def complete(self, system: str, prompt: str) -> str:
+        return self.answer
+
+    def complete_vision(self, system: str, prompt: str, image_b64: str,
+                        mime: str = "image/png") -> str:
+        return self.answer
+
+
+# NOTE: "local" is deliberately NOT in _REGISTRY. The server builds CaptureModel
+# / LocalBridgeModel directly for /ask, while every secondary path (/diag,
+# /upload, /review) calls get_model("local") and safely falls back to offline —
+# no on-device round-trip where one would make no sense.
 _REGISTRY = {
     "offline": RuleBasedModel,
     "claude": ClaudeModel,
@@ -238,6 +292,9 @@ def model_status() -> dict[str, bool]:
             out[key] = bool(getattr(_REGISTRY[key](), "available", False))
         except Exception:
             out[key] = False
+    # "local" runs in the browser on the user's own GPU — no server-side key, so
+    # it is always offered; the page itself disables it when WebGPU is absent.
+    out["local"] = True
     return out
 
 

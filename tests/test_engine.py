@@ -296,6 +296,53 @@ def test_walk_holds_carry_human_ask():
     assert a["what"] and a["why"] and a["how"] and a["when"]
 
 
+def test_local_bridge_frames_on_device_answer():
+    # On-device lane, phase 2: the browser-GPU draft is what the full SB+URR
+    # walk wraps — answer is preserved, falsifier added, the pyramid still fires.
+    from sourceborn.llm import LocalBridgeModel
+    eng = _engine()
+    walk = eng.run_walk("why does the small idea win?",
+                        model=LocalBridgeModel("Direct answer: it stays lighter."))
+    out = walk["result"].output
+    assert "lighter" in out.answer.lower()       # the on-device draft survived
+    assert out.falsifier                          # full walk still wrapped it
+    assert walk["walk"]["node_count"] >= 5        # the pyramid fired
+
+
+def test_capture_model_yields_real_engine_prompt():
+    # On-device lane, phase 1: CaptureModel unwinds with the genuine stage-8
+    # prompt (so the browser completes exactly what a cloud model would have).
+    from sourceborn.llm import CaptureModel, LocalCaptured
+    from sourceborn.engine import NO_LIVE
+    eng = _engine()
+    try:
+        eng.run("prove the small idea wins with current data",
+                model=CaptureModel(), live_override=NO_LIVE)
+        assert False, "CaptureModel should unwind via LocalCaptured"
+    except LocalCaptured as cap:
+        assert cap.system and "ASK:" in cap.prompt          # the real output prompt
+        assert "LIVE FACT: none" in cap.prompt              # NO_LIVE -> no fact faked
+
+
+def test_no_live_sentinel_skips_grounding_without_faking_fact():
+    from sourceborn.engine import NO_LIVE
+    eng = _engine()
+    res = eng.run("prove this with current data", live_override=NO_LIVE)
+    # private lane never invents a live fact, so confidence is not inflated High
+    assert res.output.confidence != "High"
+
+
+def test_local_status_always_offered():
+    from sourceborn.llm import model_status
+    assert model_status()["local"] is True       # lane exists; page gates on WebGPU
+
+
+def test_local_not_in_registry_falls_back_offline():
+    # secondary paths (/diag, /upload, /review) must degrade, never 500
+    from sourceborn.llm import get_model
+    assert get_model("local").name == "offline"
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

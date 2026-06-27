@@ -35,9 +35,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from . import scheduler
-from .engine import SourcebornEngine
+from .engine import SourcebornEngine, NO_LIVE
 from .extract import extract_text
-from .llm import get_model, model_status, generate_image
+from .llm import (get_model, model_status, generate_image,
+                  CaptureModel, LocalBridgeModel, LocalCaptured)
 from .models import _now
 
 SB_ROOT = os.environ.get("SB_ROOT", ".sourceborn")
@@ -322,6 +323,7 @@ details[open]>summary:before{content:"\25be  "}
         <button id=go class=primary onclick=ask()><span id=goico>&#9654;</span><span id=golbl>Run engine</span></button>
         <button class=iconbtn id=mic title="voice to text" onclick=dictate()>&#127908;</button>
         <span class=field><select id=model title="base model"></select></span>
+        <span class=field id=localwrap style="display:none"><select id=localmodel title="on-device model — runs on your GPU, nothing leaves your machine"></select></span>
         <label class=switch title="keep the thread — fold the last answer into the next ask"><input type=checkbox id=cont checked><span class=track></span> continue thread</label>
         <span class=status id=status></span>
       </div>
@@ -348,6 +350,14 @@ details[open]>summary:before{content:"\25be  "}
 const STAGES=[["1","Foundation & Intake"],["2","Human Core"],["3","Truth & Doubt"],["4","Evidence"],
 ["5","Connection & Memory"],["6","Synthetic & Invention"],["7","Risk & Control"],["8","Output & Update"]];
 const EXAMPLES=[];
+// On-device models (run in the browser on the user's own GPU via WebLLM). IDs
+// come from WebLLM's prebuilt list; the engine still wraps every answer.
+const LOCAL_MODELS=[
+  ['Llama-3.2-1B-Instruct-q4f16_1-MLC','Llama 3.2 1B · fast (~0.9 GB)'],
+  ['Qwen2-0.5B-Instruct-q4f32_1-MLC','Qwen2 0.5B · fastest (~0.6 GB)'],
+  ['Phi-3-mini-4k-instruct-q4f16_1-MLC','Phi-3 mini · stronger (~2.2 GB)'],
+  ['Gemma-2B-it-q4f32_1-MLC','Gemma 2B · alt (~1.4 GB)'],
+];
 function stageOf(id){let n=parseInt((id||'').replace('SB-',''));if(!n)return 0;
   return n<=8?1:n<=18?2:n<=28?3:n<=36?4:n<=44?5:n<=52?6:n<=60?7:8}
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -356,20 +366,25 @@ function confPct(c){c=(''+c).toLowerCase();return c=='high'?92:c=='medium'?62:c=
 let HIST=JSON.parse(localStorage.getItem('sb_hist')||'[]');
 let LASTQ='',LASTD=null,LASTANS='',THREAD=[];
 
+const HASGPU=!!(navigator.gpu);
 fetch('/health').then(r=>r.json()).then(d=>{
   const sel=document.getElementById('model');
-  const labels={offline:'Offline (no key)',claude:'Claude (deep)',grok:'Grok (raw)',openai:'OpenAI',openrouter:'OpenRouter'};
+  const labels={offline:'Offline (no key)',claude:'Claude (deep)',grok:'Grok (raw)',openai:'OpenAI',openrouter:'OpenRouter',local:'Local — private (your GPU)'};
   for(const [k,ok] of Object.entries(d.models)){
     const o=document.createElement('option');o.value=k;
-    o.textContent=labels[k]+(ok?'':' — add key');if(!ok&&k!=='offline')o.disabled=true;
+    let lab=labels[k]||k;
+    if(k==='local'){ lab+=HASGPU?'':' — needs WebGPU'; if(!HASGPU)o.disabled=true; }
+    else { lab+=(ok?'':' — add key'); if(!ok&&k!=='offline')o.disabled=true; }
+    o.textContent=lab;
     if(k===d.model)o.selected=true;sel.appendChild(o);
   }
+  sel.addEventListener('change',syncLocalUI); syncLocalUI();
   document.getElementById('mname').textContent=(labels[d.model]||d.model).split(' ')[0];
   if(d.model!=='offline')document.getElementById('pdot').classList.add('live');
   document.getElementById('bpill').textContent=d.brains||95;
   const set=d.weekly&&d.weekly.last_weekly_update;
   document.getElementById('wpill').innerHTML='weekly <b>'+(set?'active':'due')+'</b>';
-}); drawPyr(new Set(),{}); drawHist(); loadLibrary();
+}); drawPyr(new Set(),{}); drawHist(); loadLibrary(); initLocalPicker();
 document.getElementById('examples').innerHTML=EXAMPLES.map(e=>'<span class=chip>'+esc(e)+'</span>').join('');
 document.querySelectorAll('#examples .chip').forEach((c,i)=>c.onclick=()=>{
   const q=document.getElementById('q');q.value=EXAMPLES[i];q.focus()});
@@ -397,14 +412,65 @@ function busy(on){
 }
 function ctx(){ if(!document.getElementById('cont').checked) return '';
   return THREAD.slice(-3).map(t=>'You asked: '+t.q+'\nReply was: '+t.a).join('\n\n'); }
+function initLocalPicker(){
+  const lm=document.getElementById('localmodel'); if(!lm)return;
+  const saved=localStorage.getItem('sb_local_model')||LOCAL_MODELS[0][0];
+  lm.innerHTML=LOCAL_MODELS.map(([v,t])=>'<option value="'+v+'">'+esc(t)+'</option>').join('');
+  lm.value=saved; if(lm.value!==saved)lm.value=LOCAL_MODELS[0][0];
+  lm.addEventListener('change',()=>localStorage.setItem('sb_local_model',lm.value));
+}
+function syncLocalUI(){
+  const isLocal=document.getElementById('model').value==='local';
+  const w=document.getElementById('localwrap'); if(w)w.style.display=isLocal?'':'none';
+}
+function waitForLocal(ms){            // the WebLLM module loads async — give it a moment
+  return new Promise((res,rej)=>{
+    if(window.__localLLM)return res();
+    let t=0; const iv=setInterval(()=>{
+      if(window.__localLLM){clearInterval(iv);res();}
+      else if((t+=100)>=ms){clearInterval(iv);rej(new Error('on-device engine library still loading — try again in a moment'));}
+    },100);
+  });
+}
+async function ensureLocalModel(){
+  if(!navigator.gpu)throw new Error('this browser has no WebGPU — use Chrome/Edge 121+ or Safari 18+');
+  await waitForLocal(8000);
+  const st=document.getElementById('status');
+  await window.__localLLM.load(p=>{
+    const pct=Math.round(((p&&p.progress)||0)*100);
+    st.textContent=(p&&p.text)?('on-device model · '+p.text):('loading on-device model… '+pct+'%');
+  });
+}
+async function askLocal(q){
+  const st=document.getElementById('status');
+  st.textContent='engine preparing prompt…';
+  const r1=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({question:q,model:'local',context:ctx()})});
+  const d1=await r1.json();
+  if(!d1||d1.stage!=='need_local')return d1;      // server already answered (fallback)
+  await ensureLocalModel();
+  st.textContent='thinking on your GPU…';
+  const answer=await window.__localLLM.generate(d1.system,d1.prompt);
+  st.textContent='running SB + URR…';
+  const r2=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({question:q,model:'local',context:ctx(),local_answer:answer})});
+  return await r2.json();
+}
 async function ask(){
   const q=document.getElementById('q').value.trim(); if(!q)return; busy(true); LASTQ=q;
+  const model=document.getElementById('model').value;
   try{
-    const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({question:q,model:document.getElementById('model').value,context:ctx()})});
-    const d=await r.json(); render(d);
-    HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
-    THREAD.push({q:q,a:LASTANS}); if(THREAD.length>8)THREAD=THREAD.slice(-8);
+    let d;
+    if(model==='local'){ d=await askLocal(q); }
+    else{
+      const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({question:q,model,context:ctx()})});
+      d=await r.json();
+    }
+    if(d){ render(d);
+      HIST=[q,...HIST.filter(x=>x!==q)].slice(0,30); localStorage.setItem('sb_hist',JSON.stringify(HIST)); drawHist();
+      THREAD.push({q:q,a:LASTANS}); if(THREAD.length>8)THREAD=THREAD.slice(-8);
+    }
   }catch(e){document.getElementById('out').innerHTML='<div class=card>error: '+esc(''+e)+'</div>'}
   busy(false);
 }
@@ -635,7 +701,31 @@ async function weeklyUpdate(){
 }
 loadBrains(); loadSnapshots();
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))ask()});
-</script></div></body></html>"""
+</script></div>
+<script type="module">
+// On-device inference: the model runs in THIS browser on the user's GPU via
+// WebGPU. The prompt never goes to a third-party LLM — only back to this app's
+// own engine for SB+URR framing. Library + weights are fetched once (then cached
+// by the browser) from the WebLLM CDN.
+import { CreateMLCEngine } from "https://esm.run/@mlc-ai/web-llm";
+let engine=null, loading=null;
+const DEF="Llama-3.2-1B-Instruct-q4f16_1-MLC";
+function mid(){ try{ return localStorage.getItem('sb_local_model')||DEF; }catch(e){ return DEF; } }
+async function load(onp){
+  if(engine && engine.__mid===mid()) return engine;     // reuse unless model changed
+  loading = CreateMLCEngine(mid(), { initProgressCallback: p=>{ try{ onp&&onp(p); }catch(e){} } });
+  engine = await loading; engine.__mid = mid(); loading=null; return engine;
+}
+async function generate(system, prompt){
+  const e = await load();
+  const reply = await e.chat.completions.create({
+    messages:[{role:'system',content:system||''},{role:'user',content:prompt||''}],
+    temperature:0.7, max_tokens:1024 });
+  return (reply && reply.choices && reply.choices[0] && reply.choices[0].message.content) || '';
+}
+window.__localLLM = { load, generate, supported:()=>!!navigator.gpu };
+</script>
+</body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -774,7 +864,11 @@ class Handler(BaseHTTPRequestHandler):
                 question = (question +
                             "\n\n[continuing our thread — your prior answer]:\n"
                             + context)
-            model = get_model(data.get("model", "offline"))
+            name = str(data.get("model", "offline") or "offline").lower()
+            if name == "local":              # on-device lane (browser GPU)
+                self._ask_local(question, data)
+                return
+            model = get_model(name)
             walk = ENGINE.run_walk(question, model=model)
             self._send(200, self._walk_payload(walk["result"], walk, model.name),
                        "application/json")
@@ -866,6 +960,40 @@ class Handler(BaseHTTPRequestHandler):
         else:
             walk = ENGINE.run_walk(question, model=model, live_override=extra or None)
         self._send(200, self._walk_payload(walk["result"], walk, model.name),
+                   "application/json")
+
+    def _ask_local(self, question: str, data: dict) -> None:
+        """On-device (browser-GPU) lane — two phases, so the prompt never reaches
+        a third-party LLM. Phase 1: run the engine just far enough to build its
+        real output prompt and hand that back to the browser. Phase 2: the
+        browser returns the GPU-generated draft and the FULL SB + URR walk frames
+        it. ``live_override=NO_LIVE`` keeps the private lane from phoning out
+        (no Tavily), and is identical across both phases so the prompt is stable."""
+        local_answer = data.get("local_answer")
+        if local_answer is None:                       # phase 1 — capture prompt
+            try:
+                ENGINE.run_walk(question, model=CaptureModel(), live_override=NO_LIVE)
+            except LocalCaptured as cap:
+                self._send(200, json.dumps({
+                    "stage": "need_local",
+                    "system": cap.system, "prompt": cap.prompt}).encode(),
+                    "application/json")
+                return
+            # The engine never reached the model (rare) — give the browser a sane
+            # fallback so the lane still answers.
+            voice = ""
+            try:
+                voice = ENGINE.persona.voice_guidance()
+            except Exception:
+                pass
+            self._send(200, json.dumps({
+                "stage": "need_local", "system": voice, "prompt": question}).encode(),
+                "application/json")
+            return
+        # phase 2 — frame the on-device draft through the full walk
+        walk = ENGINE.run_walk(question, model=LocalBridgeModel(str(local_answer)),
+                               live_override=NO_LIVE)
+        self._send(200, self._walk_payload(walk["result"], walk, "local"),
                    "application/json")
 
 
