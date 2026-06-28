@@ -42,6 +42,11 @@ from .parameters import COMPARISON_AXES, PARAMETER_BANK
 from .persona import Persona
 from .wisdom import WisdomBank
 
+# ``live_override`` sentinel for the on-device private lane: skip live grounding
+# entirely (never phone a third party like Tavily) WITHOUT faking a live fact —
+# ``live`` stays empty, so the engine stays honest about having no current data.
+NO_LIVE = "__no_live__"
+
 
 @dataclass
 class RunResult:
@@ -256,7 +261,10 @@ class SourcebornEngine:
             self._t("SB-40", "merge_proposal", "held", note="needs human gate")
 
         # 6. LIVE GROUNDING — SB-33 (pluggable eyes; human-added data wins) -
-        live = live_override or self.grounding(raw_text)
+        if live_override == NO_LIVE:        # on-device private lane: never phone out
+            live = ""                       # honest: no live fact, and none faked
+        else:
+            live = live_override or self.grounding(raw_text)
         if not live and deep:
             gaps.append(GapItem("No live fact source connected", "Evidence", "Medium",
                                 LoopType.EVIDENCE.value))
