@@ -10,6 +10,8 @@ Affect is first-class data (Principle 15): feeling is read, not dismissed.
 
 from __future__ import annotations
 
+import re
+
 # lens -> signal words that hint the lens is active in the raw text
 LENS_SIGNALS: dict[str, list[str]] = {
     "Mask & Payoff": ["look", "image", "prove", "impress", "status", "ego",
@@ -42,7 +44,11 @@ def six_lenses(text: str) -> dict:
     low = text.lower()
     lenses: dict[str, dict] = {}
     for lens, words in LENS_SIGNALS.items():
-        hits = [w for w in words if w in low]
+        # whole-word match only — so "credit" in a bill or "build" inside
+        # "Building" no longer trips a psychological lens (the bug that
+        # psychoanalysed a billing spreadsheet).
+        hits = [w for w in words
+                if re.search(r"\b" + re.escape(w) + r"\b", low)]
         lenses[lens] = {
             "signals": hits,
             "active": bool(hits),

@@ -22,6 +22,7 @@ from typing import Any, Callable
 from . import safety
 from .brains import BrainRegistry
 from .core_gate import six_lenses
+from .domain import classify_domain, audit_numeric
 from .doubt import doubt_engine, falsifier as make_falsifier, witness
 from .dots import dot_connections, merge_proposal
 from .drift_guard import reality_reanchor
@@ -107,22 +108,32 @@ class SourcebornEngine:
 
     @staticmethod
     def _noise_strip(text: str) -> dict[str, list[str]]:
-        """SB-02: separate the raw ask into channels (kept, never discarded)."""
+        """SB-02: separate the raw ask into channels (kept, never discarded).
+
+        Whole-word matching only — otherwise "Building Automation" lands in the
+        invention channel (it contains "build") and a spec sheet's cells get
+        dumped into the Wild Path. Word boundaries stop that misfire.
+        """
+        import re
         buckets: dict[str, list[str]] = {
             "fact": [], "feeling": [], "assumption": [], "pressure": [],
             "claim": [], "mystery": [], "invention_seed": [], "command": [],
         }
+
+        def hit(low: str, words: tuple[str, ...]) -> bool:
+            return any(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words)
+
         for line in SourcebornEngine._decompose(text):
             low = line.lower()
-            if any(w in low for w in ("i feel", "thrill", "fear", "ego", "pain", "love")):
+            if hit(low, ("i feel", "thrill", "fear", "ego", "pain", "love")):
                 buckets["feeling"].append(line)
-            elif any(w in low for w in ("must", "need", "want", "should", "have to")):
+            elif hit(low, ("must", "need", "want", "should", "have to")):
                 buckets["command"].append(line)
-            elif any(w in low for w in ("maybe", "what if", "could", "consider")):
+            elif hit(low, ("maybe", "what if", "could", "consider")):
                 buckets["assumption"].append(line)
-            elif any(w in low for w in ("invent", "new tool", "build", "create")):
+            elif hit(low, ("invent", "new tool", "build", "create")):
                 buckets["invention_seed"].append(line)
-            elif any(w in low for w in ("why", "mystery", "unknown", "how come")):
+            elif hit(low, ("why", "mystery", "unknown", "how come")):
                 buckets["mystery"].append(line)
             else:
                 buckets["claim"].append(line)
@@ -130,15 +141,20 @@ class SourcebornEngine:
 
     # -- URR micro-pass ----------------------------------------------------
     def urr_micropass(self, urr_id: str, sb_node_id: str, content: str,
-                      synthetic: bool = False, live: str | None = None) -> URRPacket:
+                      synthetic: bool = False, live: str | None = None,
+                      private_doc: bool = False) -> URRPacket:
         """A verification gate: classify, score force-fit, detect halts.
 
         This is the rule-based URR. A model-backed URR can subclass / replace it.
         ``live`` lets a caller pass already-resolved live fact (or human-added
         data) so the evidence check honours it instead of re-querying.
+        ``private_doc`` marks a provided file: the web cannot verify a private
+        bill, so an Evidence halt there is the wrong gate (it would hold forever)
+        — the document *is* the data; we review it, not chase a live source.
         """
         low = content.lower()
-        classification = Classification.CLAIM.value
+        classification = Classification.REVIEW_ONLY.value if private_doc \
+            else Classification.CLAIM.value
         evidence = EvidenceTag.REVIEW.value
         force_fit = ForceFitRisk.LOW.value
         halt: str | None = None
@@ -150,7 +166,8 @@ class SourcebornEngine:
             force_fit = ForceFitRisk.HIGH.value
             halt = HaltType.LOGIC.value
         has_live = live if live is not None else self.grounding(content)
-        if any(w in low for w in ("proof", "evidence", "data", "fact", "current")):
+        if not private_doc and any(
+                w in low for w in ("proof", "evidence", "data", "fact", "current")):
             if not has_live:
                 halt = HaltType.EVIDENCE.value
         verdict = safety.check(content)
@@ -207,24 +224,40 @@ class SourcebornEngine:
         micro = self._decompose(raw_text)
         self._t("SB-02", "decompose", "running", note=f"{len(micro)} micro-questions")
 
-        # 4. TRIAGE routine vs deep ---------------------------------------
+        # 4. SOURCE-DOMAIN CLASSIFY (SB-03): what KIND of source is this? -
+        # A numeric/financial document is audited; prose/a claim is read by the
+        # lenses. This is the split that stops a bill being psychoanalysed.
+        dom = classify_domain(raw_text, origin)
+        private_doc = dom["audit_applicable"]
+        audit = audit_numeric(raw_text) if private_doc else None
+        self._t("SB-03", "source_domain", "running", note=dom["label"])
+
+        # TRIAGE routine vs deep
         deep = len(micro) > 1 or any(
             w in raw_text.lower() for w in ("why", "prove", "mystery", "invent", "rh", "theory")
         )
         self._t("SB-03", "triage", "running", note="deep" if deep else "routine")
 
-        # 4b. CORE GATE — six lenses (SB-10): read the human under the words
-        core = six_lenses(raw_text)
+        # 4b. CORE GATE — SB-10. Read the human under the words ONLY for prose /
+        # a claim. A numeric document is audited, not psychoanalysed — force-
+        # fitting a lens onto numbers is exactly the divert the core forbids.
+        if dom["lens_applicable"]:
+            core = six_lenses(raw_text)
+        else:
+            core = {"lenses": {}, "active_count": 0,
+                    "dominant_lens": f"{dom['label']} — audited, not psychoanalysed"}
         self.memory.write("SB-10", MemoryEntry(
             node_id="SB-10", raw_source_id=raw.raw_source_id,
             content=f"core gate dominant lens: {core['dominant_lens']}",
-            parameters={"lenses": core["lenses"]},
+            parameters={"lenses": core["lenses"], "domain": dom["domain"]},
             pyramid={"main": [k for k, v in core["lenses"].items() if v["active"]],
                      "sub": [], "micro": []},
             tags=["core_gate", "human_layer"],
         ), name="Core Gate — Six Lenses")
         self._t("SB-10", "core_gate", "running",
-                note=f"dominant: {core['dominant_lens']} ({core['active_count']}/6 lenses)")
+                note=(f"dominant: {core['dominant_lens']} ({core['active_count']}/6 lenses)"
+                      if dom["lens_applicable"]
+                      else f"numeric audit — {audit['summary'] if audit else ''}"))
 
         # 5. EXAMPLE & WISDOM MATCH (the heart) ---------------------------
         matched: list[str] = []
@@ -263,13 +296,21 @@ class SourcebornEngine:
         # 6. LIVE GROUNDING — SB-33 (pluggable eyes; human-added data wins) -
         if live_override == NO_LIVE:        # on-device private lane: never phone out
             live = ""                       # honest: no live fact, and none faked
+        elif private_doc:                   # a private file: the web can't see it
+            live = ""                       # we review the document, not chase Tavily
         else:
             live = live_override or self.grounding(raw_text)
-        if not live and deep:
+        # Only a public claim opens an Evidence gap. A provided document IS the
+        # data — demanding a live web source for a private bill holds it forever.
+        if not live and deep and not private_doc:
             gaps.append(GapItem("No live fact source connected", "Evidence", "Medium",
                                 LoopType.EVIDENCE.value))
-        self._t("SB-33", "live_grounding", "running" if live else "gap_open",
-                note="live data" if live else "no live source")
+        if private_doc:
+            self._t("SB-33", "live_grounding", "running",
+                    note="private document — internal-consistency checked; web grounding N/A")
+        else:
+            self._t("SB-33", "live_grounding", "running" if live else "gap_open",
+                    note="live data" if live else "no live source")
 
         # Stage 4 — Evidence ladder + source tags (SB-29)
         corpus_refs = [m[8:] for m in matched if m.startswith("corpus:")]
@@ -279,7 +320,8 @@ class SourcebornEngine:
                 note=f"ladder confidence {ladder_conf}")
 
         # 7. URR VERIFY ----------------------------------------------------
-        packet = self.urr_micropass("URR-08", "SB-08", raw_text, live=live)
+        packet = self.urr_micropass("URR-08", "SB-08", raw_text, live=live,
+                                    private_doc=private_doc)
         if packet.halt_triggered:
             halts.append(packet.halt_type or "")
             loop = loop_for_halt(HaltType(packet.halt_type))
@@ -293,10 +335,29 @@ class SourcebornEngine:
         else:
             self._t("URR-08", "verify", "passed", note=packet.classification)
 
-        # 8. PLACE — build the lanes (URR-07 output lanes) ----------------
-        draft = active_model.complete(
-            system=self.persona.voice_guidance(),
-            prompt=(
+        # 8. PLACE — build the output prompt. A numeric/financial document gets
+        # an AUDIT instruction plus the figures computed in Python, so even a
+        # weak or offline model states real numbers, never psychology. Prose / a
+        # claim keeps the direct-answer + falsifier shape.
+        if private_doc:
+            prompt = (
+                "You are reviewing a NUMERIC / FINANCIAL DOCUMENT, not a personal "
+                "claim. Do NOT psychoanalyse it (no Mask/Wound/loyalty language). "
+                "Be concrete and use the AUDIT figures below — invent nothing.\n"
+                "1) 'Direct answer:' — in 1-2 sentences, what this document is and "
+                "its headline figure (the likely grand total).\n"
+                "2) 'Reads:' — the key figures: total, any GST/tax, and the "
+                "negative/correction entries and what they do to the payable.\n"
+                "3) 'Cannot verify:' — state plainly what can't be confirmed "
+                "without the structured sheet or the source contract/BOQ; never "
+                "claim the bill is correct.\n"
+                "4) End with one 'Falsifier:' line.\n"
+                f"DOCUMENT (excerpt): {raw_text[:1500]}\n"
+                f"AUDIT (computed, trustworthy): {audit}\n"
+                f"MATCHED EXAMPLES: {matched[:3]}"
+            )
+        else:
+            prompt = (
                 "Answer in the user's voice. These RULES fix known weak spots — be "
                 "DIRECT, BRIEF, technically precise, and name your evidence:\n"
                 "1) Open with 'Direct answer:' — 1-3 sentences that answer the literal "
@@ -312,8 +373,8 @@ class SourcebornEngine:
                 f"CORE GATE dominant lens: {core['dominant_lens']}; active: "
                 f"{[k for k, v in core['lenses'].items() if v['active']]}\n"
                 f"EVIDENCE: {ladder_conf} (rungs {[e['evidence_tag'] for e in ledger]})"
-            ),
-        )
+            )
+        draft = active_model.complete(system=self.persona.voice_guidance(), prompt=prompt)
 
         # Stage 3 — Doubt Engine + Witness (SB-20/22): attack before delivery
         doubt = doubt_engine(draft, bool(live), len(matched))
@@ -330,8 +391,13 @@ class SourcebornEngine:
             self._t("SB-45", "synthetic_fuel", "synthetic_assumption_active",
                     note=fuel_item["fuel"])
 
-        # Stage 7 — Embodied Check (SB-59) + Non-Resolution Protector (SB-57)
-        embodied_ok = not (doubt["bites"] or (bool(halts) and not live))
+        # Stage 7 — Embodied Check (SB-59) + Non-Resolution Protector (SB-57).
+        # The body resists on real doubt or a hard halt (safety/logic) — NOT
+        # merely because no web source was attached. That old echo turned one
+        # missing-source gap into two separate holds.
+        hard_halt = any(h in (HaltType.SAFETY.value, HaltType.LOGIC.value)
+                        for h in halts)
+        embodied_ok = not (doubt["bites"] or hard_halt)
         self._t("SB-59", "embodied_check", "passed" if embodied_ok else "held",
                 note="sits right" if embodied_ok else "resistance — re-loop")
         non_resolution = bool(halts) and not live and doubt["bites"]
@@ -340,10 +406,15 @@ class SourcebornEngine:
                     note="valid hold / incubate — do not force a product")
 
         lanes = {
-            "reality_path": {"known": live or "needs live source",
-                             "what_would_prove_it": "live web grounding (Tavily)"},
-            "wild_path": {"preserved": channels.get("invention_seed", []) +
-                          channels.get("mystery", [])},
+            "reality_path": {
+                "known": (audit["summary"] if (private_doc and audit)
+                          else (live or "needs live source")),
+                "what_would_prove_it": ("the structured sheet / source contract (BOQ)"
+                                        if private_doc else "live web grounding (Tavily)")},
+            # Cap the wild path and never feed a document's raw cells into it.
+            "wild_path": {"preserved": [] if private_doc else
+                          (channels.get("invention_seed", []) +
+                           channels.get("mystery", []))[:8]},
             "classification": packet.classification,
             "sequence_path": [n.sb_id for n in SB_NODES[:8]],
             # citations — every claim is backed below it (the grounding pyramid)
@@ -362,24 +433,40 @@ class SourcebornEngine:
             "synthetic_fuel": fuel_item,
             "embodied_check": "sits right" if embodied_ok else "resistance — re-loop",
             "non_resolution": non_resolution,
+            "domain": {"domain": dom["domain"], "label": dom["label"]},
         }
+        if audit is not None:
+            lanes["audit"] = audit
         if verdict.blocked:
             lanes["safety"] = verdict.safe_mapping
 
         # 8b. REALITY RE-ANCHOR — anti-divert (SB-58): did we drift from Point Zero?
+        # A document audit is anchored to the document by construction, so it
+        # cannot "drift" the way a free reasoning chain can.
         anchor = reality_reanchor(pz.literal_ask, draft)
-        lanes["reality_reanchor"] = anchor.note
+        on_target = anchor.on_target or private_doc
+        anchor_note = "audit anchored to the document" if private_doc else anchor.note
+        lanes["reality_reanchor"] = anchor_note
         self._t("SB-58", "reality_reanchor",
-                "passed" if anchor.on_target else "held", note=anchor.note)
+                "passed" if on_target else "held", note=anchor_note)
 
         # 9. DELIVER -------------------------------------------------------
+        # A reviewed document is REVIEW_ONLY at Medium (we read and checked what
+        # it states) — honest, not the forced Low it used to get for lacking a
+        # web source, and never High (we can't certify it without the contract).
+        if private_doc:
+            classification_out = Classification.REVIEW_ONLY.value
+            confidence_out = "Low" if doubt["bites"] else "Medium"
+        else:
+            classification_out = (Classification.REVIEW_ONLY.value if non_resolution
+                                  else packet.classification)
+            confidence_out = "Low" if (doubt["bites"] or gaps or halts) else ladder_conf
         out = Output(
             answer=draft,
             lanes=lanes,
             evidence_tag=packet.evidence_tag,
-            classification=(Classification.REVIEW_ONLY.value if non_resolution
-                            else packet.classification),
-            confidence="Low" if (doubt["bites"] or gaps or halts) else ladder_conf,
+            classification=classification_out,
+            confidence=confidence_out,
             falsifier=make_falsifier(raw_text),
             penetration_score=(PenetrationScore.PENETRATED.value if deep
                                else PenetrationScore.SHALLOW.value),
