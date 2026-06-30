@@ -21,6 +21,19 @@ def _engine():
     return SourcebornEngine(root=tempfile.mkdtemp(prefix="sb_test_"))
 
 
+# A flattened billing spreadsheet — the input class that used to get
+# psychoanalysed ("Mask of cumulative bill amounts") instead of audited.
+_BILL = (
+    "Final Bill Dialysis 30 beds\n"
+    "Sr Description Qty Rate Amount\n"
+    "1 Fire Fighting Works 1 0 0\n"
+    "2 Building Automation System starters 5 4200 21000\n"
+    "3 Electrical GST adjustment 1 -209745\n"
+    "4 GST adjustment 1 -19048\n"
+    "Grand Total including GST 10083937.8\n"
+)
+
+
 def test_node_map_complete():
     assert len(SB_NODES) == 70
     assert len(URR_NODES) == 25
@@ -341,6 +354,66 @@ def test_local_not_in_registry_falls_back_offline():
     # secondary paths (/diag, /upload, /review) must degrade, never 500
     from sourceborn.llm import get_model
     assert get_model("local").name == "offline"
+
+
+def test_domain_classifies_financial_document():
+    from sourceborn.domain import classify_domain
+    d = classify_domain(_BILL, origin="upload:bill.xlsx")
+    assert d["domain"] == "numeric_financial"
+    assert d["audit_applicable"] and not d["lens_applicable"]
+    q = classify_domain("why does the small idea win?")     # a question is not a doc
+    assert q["domain"] == "prose" and q["lens_applicable"]
+
+
+def test_audit_numeric_finds_total_and_negatives():
+    from sourceborn.domain import audit_numeric
+    a = audit_numeric(_BILL)
+    assert a["candidate_total"] == "10083937.80"            # grand total surfaced
+    assert a["negative_count"] >= 2                          # the two corrections
+    assert any("209745" in x for x in a["negative_examples"])
+    assert a["caveats"]                                      # honest about its limits
+
+
+def test_numeric_document_is_audited_not_psychoanalysed():
+    eng = _engine()
+    res = eng.run(_BILL, origin="upload:bill.xlsx")
+    assert "audit" in res.output.lanes
+    assert res.output.lanes["domain"]["domain"] == "numeric_financial"
+    lens = res.output.lanes["human_layer"]["dominant_lens"]
+    assert "audited" in lens
+    for psych in ("Mask", "Wound", "Loyalty", "Desire", "Pain"):
+        assert psych not in lens                             # no force-fit psychology
+    assert res.output.lanes["audit"]["candidate_total"] == "10083937.80"
+
+
+def test_private_document_no_false_evidence_hold():
+    eng = _engine()
+    walk = eng.run_walk(_BILL)
+    # a private bill no longer opens an Evidence halt (web can't verify it) and
+    # SB-59 no longer echoes it — a clean bill clears with no holds
+    assert "Evidence" not in walk["result"].halts
+    assert walk["walk"]["hold_count"] == 0
+    # honest grade: a reviewed document is REVIEW_ONLY at Medium, never forced Low
+    assert walk["result"].output.confidence == "Medium"
+    assert walk["result"].output.classification.lower().startswith("review")
+
+
+def test_noise_strip_word_boundary_building_not_invention():
+    # "Building Automation System" must NOT be read as an invention ("build")
+    ch = SourcebornEngine._noise_strip("Building Automation System starters provided")
+    assert not ch.get("invention_seed")
+    ch2 = SourcebornEngine._noise_strip("Please build a new tool for this project")
+    assert ch2.get("invention_seed")                         # a real invention still lands
+
+
+def test_prose_claim_still_uses_lenses():
+    # regression: a personal claim still gets the six-lens human read, no audit
+    eng = _engine()
+    res = eng.run("I want to prove myself and I fear I will fail")
+    assert res.output.lanes["human_layer"]["dominant_lens"] in (
+        "Mask & Payoff", "Wound & Threat")
+    assert "audit" not in res.output.lanes
+    assert res.output.lanes["domain"]["domain"] == "prose"
 
 
 def _run_all():

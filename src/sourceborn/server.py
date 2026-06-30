@@ -536,9 +536,27 @@ function confWhy(d){const o=d.output||{}; if((''+o.confidence).toLowerCase()!=='
   const holds=(d.walk&&d.walk.holds)||[];
   if(holds.length)return 'Low because '+holds.length+' node'+(holds.length>1?'s':'')+' held — e.g. '+esc(holds[0].why)+' Clear it in the review queue to raise confidence.';
   return 'Low — doubt bit or an open gap; see the node walk below.';}
+function walkRow(s){return '<div class=lane><span class="vd '+s.verdict+'">●</span> <b>'+esc(s.sb_id)+'</b> '+esc(s.sb_name)+' → '+esc(s.urr_id)+': <b>'+esc(s.verdict)+'</b>'+(s.memory_written?' <span class=memok>memory ✓</span>':'')+'<br><span class=muted style="margin-left:18px">'+esc(s.why)+'</span></div>';}
 function walkCard(d){const w=d.walk; if(!w||!w.steps)return '';
-  const rows=w.steps.map(s=>'<div class=lane><span class="vd '+s.verdict+'">●</span> <b>'+esc(s.sb_id)+'</b> '+esc(s.sb_name)+' → '+esc(s.urr_id)+': <b>'+esc(s.verdict)+'</b>'+(s.memory_written?' <span class=memok>memory ✓</span>':'')+'<br><span class=muted style="margin-left:18px">'+esc(s.why)+'</span></div>').join('');
-  return '<div class=card><div class=k>Node walk · SB ↔ URR <span class=num>'+w.node_count+' nodes · '+w.hold_count+' holds</span></div>'+rows+'</div>';}
+  const holds=w.steps.filter(s=>s.verdict==='hold'), passes=w.steps.filter(s=>s.verdict!=='hold');
+  // Holds are what need you — show them. Passes are folded so 70 'Clear' rows
+  // don't bury the signal (open the details to see them all).
+  const head=holds.length
+    ?('<div class=muted style="margin-bottom:6px">Held — these need you:</div>'+holds.map(walkRow).join(''))
+    :'<div class=lane><span class="vd pass">●</span> All '+w.node_count+' nodes cleared — no holds.</div>';
+  const rest=passes.length
+    ?('<details style="margin-top:8px"><summary>'+passes.length+' nodes passed (show all)</summary>'+passes.map(walkRow).join('')+'</details>'):'';
+  return '<div class=card><div class=k>Node walk · SB ↔ URR <span class=num>'+w.node_count+' nodes · '+w.hold_count+' holds</span></div>'+head+rest+'</div>';}
+function auditCard(d){const L=(d.output||{}).lanes||{}, a=L.audit; if(!a)return '';
+  const row=(k,v)=>'<div class=lane><b>'+esc(k)+'</b> '+esc(v)+'</div>';
+  let h=row('Document',(L.domain||{}).label||'numeric / financial');
+  h+=row('Numeric cells read',a.number_count);
+  if(a.candidate_total!=null)h+=row('Largest figure (likely grand total)',a.candidate_total);
+  if((a.stated_totals||[]).length)h+=row('Near total / amount labels',a.stated_totals.join(', '));
+  if((a.gst_figures||[]).length)h+=row('GST / tax figures',a.gst_figures.join(', '));
+  h+=row('Negative / correction entries',a.negative_count+((a.negative_examples||[]).length?(' — e.g. '+a.negative_examples.join(', ')):''));
+  if((a.caveats||[]).length)h+='<div class=fals>Cannot certify: '+a.caveats.map(esc).join(' · ')+'</div>';
+  return '<div class=card><div class=k>Numeric audit <span class=num>computed, not guessed</span></div>'+h+'</div>';}
 function reviewQueue(d){const h=(d.walk&&d.walk.holds)||[]; if(!h.length)return '';
   const cards=h.map(x=>{const a=x.ask||{};
     return '<div class=hold><div><b>'+esc(x.sb_id)+'</b> '+esc(x.name)+' <span class="badge warn">hold</span></div>'+
@@ -579,14 +597,14 @@ function render(d){
       (confWhy(d)?'<div class=why>'+confWhy(d)+'</div>':'')+
       '<div class=fals>falsifier · '+esc(o.falsifier)+'</div>'+
       '<div class=hactions><button class="btn sm" onclick="speak()">🔊 Read aloud</button><button class="btn sm" onclick="downloadReport(\'md\')">⬇ Markdown</button><button class="btn sm" onclick="downloadReport(\'csv\')">⬇ CSV</button></div></div>'+
-    walkCard(d)+reviewQueue(d)+
+    auditCard(d)+walkCard(d)+reviewQueue(d)+
     '<div class=card><div class=k>Eternal example & wisdom match</div>'+m+'</div>'+
     '<div class=card><div class=k>Core Gate · human layer (SB-10)</div>'+
       '<div class=lane>dominant lens: <b>'+esc((lanes.human_layer||{}).dominant_lens||'—')+'</b></div>'+
       Object.entries((lanes.human_layer||{}).active||{}).map(([k,v])=>'<div class=lane><b>'+esc(k)+'</b> '+esc(v)+'</div>').join('')+'</div>'+
     '<div class=card><div class=k>Output lanes (URR-07)</div>'+
       '<div class=lane><b>Reality</b> '+esc(JSON.stringify(lanes.reality_path||{}))+'</div>'+
-      '<div class=lane><b>Wild path (preserved)</b> '+esc(JSON.stringify((lanes.wild_path||{}).preserved||[]))+'</div>'+
+      (((lanes.wild_path||{}).preserved||[]).length?'<div class=lane><b>Wild path (preserved)</b> '+esc(JSON.stringify(lanes.wild_path.preserved))+'</div>':'')+
       '<div class=lane><b>Re-anchor</b> '+esc(lanes.reality_reanchor||'')+'</div>'+
       (lanes.safety?'<div class=lane><b class=hl>Safety</b> '+esc(JSON.stringify(lanes.safety))+'</div>':'')+'</div>'+
     '<div class=card><div class=k>Truth & evidence (Stages 3–6)</div>'+
