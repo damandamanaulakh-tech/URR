@@ -1,6 +1,9 @@
 """CLI: ``python -m sourceborn "your question"``  (add --public for public-safe).
 
 With no question, runs the demo.
+
+Prints: ask, answer, classification, evidence_tag, confidence, penetration_score,
+matched_examples, halts, falsifier, and memory stats.
 """
 
 from __future__ import annotations
